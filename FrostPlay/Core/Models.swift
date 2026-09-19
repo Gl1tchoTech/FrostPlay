@@ -76,6 +76,9 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
 }
 
 struct FrostPlaySettings: Codable {
+    // This default is user-configurable in Settings and is intentionally stored locally.
+    var tmdbAPIKey = "0cb8d58d39349ca2aa7438f9fd10282a"
+    var tmdbReadAccessToken = ""
     var theme: AppTheme = .dark
     var enabledSources: [PlaybackSource] = PlaybackSource.implemented
     var preferredAnimeLanguage = "sub"

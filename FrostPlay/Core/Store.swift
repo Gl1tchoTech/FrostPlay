@@ -13,8 +13,11 @@ final class FrostPlayStore: ObservableObject {
     @Published var searchError: String?
     @Published var homeError: String?
 
-    private let tmdb: TMDBService
     private let anilist = AniListService()
+
+    private var tmdb: TMDBService {
+        TMDBService(apiKey: settings.tmdbAPIKey, readAccessToken: settings.tmdbReadAccessToken)
+    }
 
     var isTMDBConfigured: Bool { tmdb.isConfigured }
 
@@ -22,11 +25,6 @@ final class FrostPlayStore: ObservableObject {
         settings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
         library = Self.load([MediaItem].self, key: "library") ?? []
         history = Self.load([WatchEntry].self, key: "history") ?? []
-        let info = Bundle.main
-        tmdb = TMDBService(
-            apiKey: info.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String ?? "",
-            readAccessToken: info.object(forInfoDictionaryKey: "TMDB_API_READ_ACCESS_TOKEN") as? String ?? ""
-        )
     }
 
     func loadHome() async {

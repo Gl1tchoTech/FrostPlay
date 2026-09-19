@@ -312,9 +312,13 @@ struct SettingsView: View {
                     .onMove { source, destination in store.moveSource(from: source, to: destination) }
                 }
                 Section("Catalog") {
+                    SecureField("TMDB API key", text: $store.settings.tmdbAPIKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.password)
                     Label(store.isTMDBConfigured ? "TMDB connected" : "TMDB key not configured", systemImage: store.isTMDBConfigured ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(store.isTMDBConfigured ? .green : .orange)
-                    Text("Add TMDB_API_KEY or TMDB_API_READ_ACCESS_TOKEN to the app target configuration for live movie and TV browsing.")
+                    Text("This key is stored locally on this device and used for direct TMDB requests. Changing it takes effect on the next home load or search.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
