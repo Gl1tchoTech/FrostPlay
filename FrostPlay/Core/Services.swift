@@ -108,7 +108,8 @@ struct TMDBService: MetadataService {
             aniListID: nil,
             malID: nil,
             providerNames: [],
-            year: (result.releaseDate ?? result.firstAirDate)?.prefix(4).description
+            year: (result.releaseDate ?? result.firstAirDate)?.prefix(4).description,
+            episodeCount: nil
         )
     }
 }
@@ -128,6 +129,7 @@ struct AniListService: MetadataService {
                   title { romaji english native }
                   description
                   seasonYear
+                  episodes
                   coverImage { large }
                   bannerImage
                 }
@@ -154,7 +156,8 @@ struct AniListService: MetadataService {
                     aniListID: anime.id,
                     malID: anime.idMal,
                     providerNames: ["MegaPlay"],
-                    year: anime.seasonYear.map(String.init)
+                    year: anime.seasonYear.map(String.init),
+                    episodeCount: anime.episodes
                 )
             }
         } catch {
@@ -229,6 +232,7 @@ private struct AniListResponse: Decodable {
         let title: Title
         let description: String?
         let seasonYear: Int?
+        let episodes: Int?
         let coverImage: Cover
         let bannerImage: String?
     }

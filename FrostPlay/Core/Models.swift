@@ -25,6 +25,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let malID: Int?
     let providerNames: [String]
     let year: String?
+    let episodeCount: Int?
 
     static let preview = MediaItem(
         id: "preview-furiosa",
@@ -37,7 +38,8 @@ struct MediaItem: Identifiable, Codable, Hashable {
         aniListID: nil,
         malID: nil,
         providerNames: ["VidLink", "TMDB"],
-        year: "2024"
+        year: "2024",
+        episodeCount: nil
     )
 }
 

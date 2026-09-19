@@ -453,15 +453,55 @@ struct Poster: View {
 struct DetailView: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
+    @State private var selectedEpisode = 1
+
+    private var episodeNumbers: [Int] {
+        Array(1...(max(media.episodeCount ?? 1, 1)))
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 260).frame(maxWidth: .infinity)
                 Text(media.title).font(.largeTitle.bold()).foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
+
+                if media.kind == .anime {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Episodes").font(.headline)
+                            Spacer()
+                            Text(media.episodeCount.map(String.init) ?? "Count unavailable")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if media.episodeCount == nil {
+                            Text("AniList did not provide an episode count. Episode 1 remains available to try.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(episodeNumbers, id: \.self) { episode in
+                                    Button("E\(episode)") { selectedEpisode = episode }
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(selectedEpisode == episode ? .black : .white)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .background(selectedEpisode == episode ? frostOrange : frostPanel)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(frostPanel)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
                 HStack {
                     Button(store.isInLibrary(media) ? "Saved" : "Add to Library") { store.toggleLibrary(media) }.buttonStyle(.borderedProminent)
-                    NavigationLink("Watch", destination: PlayerView(media: media)).buttonStyle(.bordered)
+                    NavigationLink("Watch", destination: PlayerView(media: media, episode: selectedEpisode)).buttonStyle(.bordered)
                 }
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 if !media.providerNames.isEmpty { Text("Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(frostOrange) }
@@ -478,10 +518,17 @@ struct DetailView: View {
 struct PlayerView: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
+    let episode: Int
     private let resolver = PlaybackResolver()
+
+    init(media: MediaItem, episode: Int = 1) {
+        self.media = media
+        self.episode = episode
+    }
+
     var body: some View {
         Group {
-            if let format = resolver.resolve(media: media, settings: store.settings) {
+            if let format = resolver.resolve(media: media, settings: store.settings, episode: episode) {
                 HybridPlayer(format: format)
             } else {
                 ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Enable a compatible source in Settings, or verify this title has the required ID."))
@@ -489,7 +536,7 @@ struct PlayerView: View {
         }
         .background(Color.black)
         .onAppear { store.recordWatch(media) }
-        .navigationTitle(media.title)
+        .navigationTitle(media.kind == .anime ? "Episode \(episode)" : media.title)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
