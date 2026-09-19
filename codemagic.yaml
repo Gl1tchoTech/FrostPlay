@@ -1,0 +1,48 @@
+workflows:
+  ios-release:
+    name: FrostPlay iOS release
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.gl1tchotech.frostplay
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+      cancel_previous_builds: true
+
+    scripts:
+      - name: Configure Xcode signing
+        script: xcode-project use-profiles
+
+      - name: Build signed IPA
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa \
+            --project FrostPlay.xcodeproj \
+            --scheme FrostPlay \
+            --archive-flags '-destination generic/platform=iOS'
+
+      - name: Package IPA as ZIP
+        script: |
+          set -euo pipefail
+          ipa_path="$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          if [ -z "$ipa_path" ]; then
+            echo "No IPA was produced in build/ios/ipa"
+            exit 1
+          fi
+          zip_path="build/ios/ipa/FrostPlay.ipa.zip"
+          rm -f "$zip_path"
+          zip -j "$zip_path" "$ipa_path"
+          echo "Created $zip_path"
+
+    artifacts:
+      - build/ios/ipa/FrostPlay.ipa.zip
+
