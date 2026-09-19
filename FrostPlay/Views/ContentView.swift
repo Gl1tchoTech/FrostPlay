@@ -134,7 +134,35 @@ struct MediaRow: View {
     }
 }
 
-struct ContentRail: View { let title: String; let items: [MediaItem]; var body: some View { if !items.isEmpty { VStack(alignment: .leading) { Text(title).font(.title3.bold()); ScrollView(.horizontal, showsIndicators: false) { HStack { ForEach(items) { NavigationLink(destination: DetailView(media: $0)) { Poster(url: $0.posterURL, width: 110, height: 160).overlay(alignment: .bottomLeading) { Text($0.title).font(.caption.bold()).lineLimit(2).padding(6).frame(maxWidth: .infinity, alignment: .leading).background(.black.opacity(0.65)) } } } } } } } }
+struct ContentRail: View {
+    let title: String
+    let items: [MediaItem]
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading) {
+                Text(title).font(.title3.bold())
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(items) { media in
+                            NavigationLink(destination: DetailView(media: media)) {
+                                Poster(url: media.posterURL, width: 110, height: 160)
+                                    .overlay(alignment: .bottomLeading) {
+                                        Text(media.title)
+                                            .font(.caption.bold())
+                                            .lineLimit(2)
+                                            .padding(6)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(.black.opacity(0.65))
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 struct MediaCard: View { @EnvironmentObject private var store: FrostPlayStore; let media: MediaItem; var featured = false; var body: some View { NavigationLink(destination: DetailView(media: media)) { ZStack(alignment: .bottomLeading) { Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: featured ? 300 : 180).frame(maxWidth: .infinity).clipped(); LinearGradient(colors: [.clear, .black], startPoint: .center, endPoint: .bottom); VStack(alignment: .leading) { Text(media.title).font(.title.bold()); Text(media.overview).font(.caption).lineLimit(2) }.padding() } }.buttonStyle(.plain).clipShape(RoundedRectangle(cornerRadius: 20)) } }
 
