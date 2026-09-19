@@ -48,7 +48,7 @@ struct WatchEntry: Identifiable, Codable, Hashable {
     var lastPlayed: Date
 }
 
-enum PlaybackSource: String, CaseIterable, Identifiable {
+enum PlaybackSource: String, Codable, CaseIterable, Identifiable {
     case vidLink = "VidLink"
     case megaPlay = "MegaPlay"
     case vidAPI = "VidAPI"
@@ -64,7 +64,7 @@ enum PlaybackSource: String, CaseIterable, Identifiable {
     }
 }
 
-enum AppTheme: String, CaseIterable, Identifiable {
+enum AppTheme: String, Codable, CaseIterable, Identifiable {
     case dark, light, system
     var id: String { rawValue }
     var colorScheme: ColorScheme? {
