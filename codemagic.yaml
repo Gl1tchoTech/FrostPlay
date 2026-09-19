@@ -6,9 +6,6 @@ workflows:
 
     environment:
       xcode: latest
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.gl1tchotech.frostplay
 
     triggering:
       events:
@@ -19,29 +16,37 @@ workflows:
       cancel_previous_builds: true
 
     scripts:
-      - name: Configure Xcode signing
-        script: xcode-project use-profiles
-
-      - name: Build signed IPA
+      - name: Build unsigned iOS app
         script: |
           set -euo pipefail
-          xcode-project build-ipa \
-            --project FrostPlay.xcodeproj \
-            --scheme FrostPlay \
-            --archive-flags '-destination generic/platform=iOS'
+          rm -rf build/ios/DerivedData build/ios/ipa
+          xcodebuild \
+            -project FrostPlay.xcodeproj \
+            -scheme FrostPlay \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ios/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
 
-      - name: Package IPA as ZIP
+      - name: Package unsigned IPA inside ZIP
         script: |
           set -euo pipefail
-          ipa_path="$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print -quit)"
-          if [ -z "$ipa_path" ]; then
-            echo "No IPA was produced in build/ios/ipa"
+          app_path="build/ios/DerivedData/Build/Products/Release-iphoneos/FrostPlay.app"
+          if [ ! -d "$app_path" ]; then
+            echo "Unsigned FrostPlay.app was not produced"
             exit 1
           fi
-          zip_path="build/ios/ipa/FrostPlay.ipa.zip"
-          rm -f "$zip_path"
-          zip -j "$zip_path" "$ipa_path"
-          echo "Created $zip_path"
+
+          mkdir -p build/ios/ipa/Payload
+          cp -R "$app_path" build/ios/ipa/Payload/FrostPlay.app
+          (cd build/ios/ipa && zip -qry FrostPlay.ipa Payload)
+          rm -rf build/ios/ipa/Payload
+
+          (cd build/ios/ipa && zip -qry FrostPlay.ipa.zip FrostPlay.ipa)
+          rm -f build/ios/ipa/FrostPlay.ipa
+          echo "Created build/ios/ipa/FrostPlay.ipa.zip"
 
     artifacts:
       - build/ios/ipa/FrostPlay.ipa.zip
