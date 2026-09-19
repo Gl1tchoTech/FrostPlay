@@ -14,9 +14,9 @@ final class FrostPlayStore: ObservableObject {
     private let anilist = AniListService()
 
     init() {
-        settings = load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
-        library = load([MediaItem].self, key: "library") ?? []
-        history = load([WatchEntry].self, key: "history") ?? []
+        settings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
+        library = Self.load([MediaItem].self, key: "library") ?? []
+        history = Self.load([WatchEntry].self, key: "history") ?? []
     }
 
     func search(query: String, kind: MediaKind? = nil) async {
@@ -67,7 +67,7 @@ final class FrostPlayStore: ObservableObject {
         UserDefaults.standard.set(data, forKey: key)
     }
 
-    private func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
