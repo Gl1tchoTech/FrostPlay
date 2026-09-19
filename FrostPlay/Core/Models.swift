@@ -50,16 +50,23 @@ struct WatchEntry: Identifiable, Codable, Hashable {
     var lastPlayed: Date
 }
 
+struct SeasonEpisodeInfo: Identifiable, Hashable {
+    let season: Int
+    let episodeCount: Int
+    var id: Int { season }
+}
+
 enum PlaybackSource: String, Codable, CaseIterable, Identifiable {
     case vidLink = "VidLink"
     case megaPlay = "MegaPlay"
     case vidAPI = "VidAPI"
     case cineSRC = "CineSRC"
     case autoEmbed = "AutoEmbed"
+    case moviesAPI = "MoviesAPI"
 
     var id: String { rawValue }
 
-    static var implemented: [PlaybackSource] { [.vidLink, .megaPlay] }
+    static var implemented: [PlaybackSource] { [.megaPlay, .vidLink, .moviesAPI] }
 
     var supports: Set<MediaKind> {
         switch self {

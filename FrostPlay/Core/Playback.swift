@@ -3,10 +3,11 @@ import SwiftUI
 import WebKit
 
 struct PlaybackResolver {
-    private let adapters: [PlaybackSourceAdapter] = [VidLinkAdapter(), MegaPlayAdapter()]
+    private let adapters: [PlaybackSourceAdapter] = [MegaPlayAdapter(), VidLinkAdapter(), MoviesAPIAdapter()]
 
     func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1) -> PlaybackFormat? {
-        for source in settings.enabledSources {
+        let orderedSources = settings.enabledSources.filter { $0.supports.contains(media.kind) }
+        for source in orderedSources {
             guard source.supports.contains(media.kind) else { continue }
             guard let adapter = adapters.first(where: { $0.source == source }) else { continue }
             if let result = adapter.playback(for: media, season: season, episode: episode, language: settings.preferredAnimeLanguage) {

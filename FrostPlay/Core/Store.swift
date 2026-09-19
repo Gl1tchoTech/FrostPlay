@@ -22,7 +22,11 @@ final class FrostPlayStore: ObservableObject {
     var isTMDBConfigured: Bool { tmdb.isConfigured }
 
     init() {
-        settings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
+        var restoredSettings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
+        let enabledSources = Set(restoredSettings.enabledSources)
+        restoredSettings.enabledSources = PlaybackSource.implemented.filter { enabledSources.contains($0) }
+        if restoredSettings.enabledSources.isEmpty { restoredSettings.enabledSources = PlaybackSource.implemented }
+        settings = restoredSettings
         library = Self.load([MediaItem].self, key: "library") ?? []
         history = Self.load([WatchEntry].self, key: "history") ?? []
     }
@@ -38,6 +42,15 @@ final class FrostPlayStore: ObservableObject {
             homeError = error.localizedDescription
         }
         isLoadingHome = false
+    }
+
+    func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
+        if media.kind == .anime {
+            guard let count = media.episodeCount, count > 0 else { return [] }
+            return [SeasonEpisodeInfo(season: 1, episodeCount: count)]
+        }
+        guard media.kind == .tv, let tmdbID = media.tmdbID else { return [] }
+        return (try? await tmdb.seasons(for: tmdbID)) ?? []
     }
 
     func search(query: String, kind: MediaKind? = nil) async {

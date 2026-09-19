@@ -54,7 +54,7 @@ struct HomeView: View {
                             .tracking(4)
                             .foregroundStyle(frostOrange)
                         Text("Your world of stories.")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
                         Text("Choose a service, then find your next obsession.")
                             .font(.subheadline)
@@ -104,11 +104,11 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
-                .padding(.bottom, 28)
+                .padding(.bottom, 52)
             }
             .background(frostBackground.ignoresSafeArea())
             .navigationTitle("Home")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .task { await store.loadHome() }
         }
         .preferredColorScheme(.dark)
@@ -143,7 +143,7 @@ struct ProviderCard: View {
                     .foregroundStyle(.white.opacity(0.62))
             }
             .padding(16)
-            .frame(width: 214, height: 132, alignment: .leading)
+            .frame(width: 190, height: 118, alignment: .leading)
             .background(provider.accent.gradient.opacity(isSelected ? 0.95 : 0.72))
             .overlay(alignment: .bottomTrailing) {
                 Circle()
@@ -240,9 +240,10 @@ struct SearchView: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, 10)
+            .padding(.bottom, 36)
             .background(frostBackground.ignoresSafeArea())
             .navigationTitle("Search")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
     }
@@ -399,7 +400,7 @@ struct ContentRail: View {
                         ForEach(items) { media in
                             NavigationLink(destination: DetailView(media: media)) {
                                 VStack(alignment: .leading, spacing: 7) {
-                                    Poster(url: media.posterURL, width: 116, height: 166)
+                                    Poster(url: media.posterURL, width: 104, height: 150)
                                     Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white)
                                 }
                             }
@@ -418,7 +419,7 @@ struct MediaCard: View {
     var body: some View {
         NavigationLink(destination: DetailView(media: media)) {
             ZStack(alignment: .bottomLeading) {
-                Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: featured ? 300 : 180)
+                Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: featured ? 240 : 170)
                     .frame(maxWidth: .infinity)
                     .clipped()
                 LinearGradient(colors: [.clear, .black.opacity(0.95)], startPoint: .center, endPoint: .bottom)
@@ -453,33 +454,49 @@ struct Poster: View {
 struct DetailView: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
+    @State private var seasons: [SeasonEpisodeInfo] = []
+    @State private var selectedSeason = 1
     @State private var selectedEpisode = 1
+    @State private var isLoadingEpisodes = false
+
+    private var currentSeason: SeasonEpisodeInfo? {
+        seasons.first(where: { $0.season == selectedSeason })
+    }
 
     private var episodeNumbers: [Int] {
-        Array(1...(max(media.episodeCount ?? 1, 1)))
+        Array(1...(max(currentSeason?.episodeCount ?? media.episodeCount ?? 1, 1)))
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 260).frame(maxWidth: .infinity)
+                Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
                 Text(media.title).font(.largeTitle.bold()).foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
 
-                if media.kind == .anime {
+                if media.kind == .tv || media.kind == .anime {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text("Episodes").font(.headline)
                             Spacer()
-                            Text(media.episodeCount.map(String.init) ?? "Count unavailable")
+                            if isLoadingEpisodes { ProgressView().tint(frostOrange) }
+                            else if let currentSeason { Text("\(currentSeason.episodeCount) episodes").font(.caption).foregroundStyle(.secondary) }
+                        }
+
+                        if seasons.count > 1 {
+                            Picker("Season", selection: $selectedSeason) {
+                                ForEach(seasons) { season in Text("Season \(season.season)").tag(season.season) }
+                            }
+                            .pickerStyle(.menu)
+                            .tint(frostOrange)
+                        }
+
+                        if seasons.isEmpty && !isLoadingEpisodes {
+                            Text("Episode information is unavailable for this title. Episode 1 remains available to try.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        if media.episodeCount == nil {
-                            Text("AniList did not provide an episode count. Episode 1 remains available to try.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(episodeNumbers, id: \.self) { episode in
@@ -497,11 +514,17 @@ struct DetailView: View {
                     .padding(14)
                     .background(frostPanel)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .task {
+                        isLoadingEpisodes = true
+                        seasons = await store.episodeCatalog(for: media)
+                        if let firstSeason = seasons.first { selectedSeason = firstSeason.season }
+                        isLoadingEpisodes = false
+                    }
                 }
 
                 HStack {
                     Button(store.isInLibrary(media) ? "Saved" : "Add to Library") { store.toggleLibrary(media) }.buttonStyle(.borderedProminent)
-                    NavigationLink("Watch", destination: PlayerView(media: media, episode: selectedEpisode)).buttonStyle(.bordered)
+                    NavigationLink("Watch", destination: PlayerView(media: media, season: selectedSeason, episode: selectedEpisode)).buttonStyle(.bordered)
                 }
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 if !media.providerNames.isEmpty { Text("Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(frostOrange) }
@@ -518,17 +541,19 @@ struct DetailView: View {
 struct PlayerView: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
+    let season: Int
     let episode: Int
     private let resolver = PlaybackResolver()
 
-    init(media: MediaItem, episode: Int = 1) {
+    init(media: MediaItem, season: Int = 1, episode: Int = 1) {
         self.media = media
+        self.season = season
         self.episode = episode
     }
 
     var body: some View {
         Group {
-            if let format = resolver.resolve(media: media, settings: store.settings, episode: episode) {
+            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode) {
                 HybridPlayer(format: format)
             } else {
                 ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Enable a compatible source in Settings, or verify this title has the required ID."))
@@ -536,7 +561,7 @@ struct PlayerView: View {
         }
         .background(Color.black)
         .onAppear { store.recordWatch(media) }
-        .navigationTitle(media.kind == .anime ? "Episode \(episode)" : media.title)
+        .navigationTitle(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

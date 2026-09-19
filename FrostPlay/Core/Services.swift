@@ -65,6 +65,15 @@ struct TMDBService: MetadataService {
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: nil) }
     }
 
+    func seasons(for tvID: Int) async throws -> [SeasonEpisodeInfo] {
+        guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
+        let data = try await request(path: "tv/\(tvID)", query: [])
+        let payload = try decode(TMDBTVDetailsResponse.self, from: data)
+        return payload.seasons
+            .filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+            .map { SeasonEpisodeInfo(season: $0.seasonNumber, episodeCount: $0.episodeCount) }
+    }
+
     private func request(path: String, query: [URLQueryItem]) async throws -> Data {
         var components = URLComponents(string: "https://api.themoviedb.org/3/\(path)")!
         var queryItems = query
@@ -175,15 +184,45 @@ struct VidLinkAdapter: PlaybackSourceAdapter {
     let source = PlaybackSource.vidLink
 
     func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat? {
+        let path: String
+        if media.kind == .anime {
+            guard let malID = media.malID, let episode else { return nil }
+            path = "anime/\(malID)/\(episode)/\(language)?fallback=true"
+        } else if media.kind == .movie {
+            guard let tmdbID = media.tmdbID else { return nil }
+            path = "movie/\(tmdbID)"
+        } else {
+            guard let tmdbID = media.tmdbID, let season, let episode else { return nil }
+            path = "tv/\(tmdbID)/\(season)/\(episode)"
+        }
+        guard let baseURL = URL(string: "https://vidlink.pro/\(path)") else { return nil }
+        if media.kind == .movie || media.kind == .tv,
+           let fallbackURL = MoviesAPIAdapter.url(for: media, season: season, episode: episode) {
+            var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "fallback_url", value: fallbackURL.absoluteString)]
+            return components?.url.map(PlaybackFormat.embed)
+        }
+        return PlaybackFormat.embed(baseURL)
+    }
+}
+
+struct MoviesAPIAdapter: PlaybackSourceAdapter {
+    let source = PlaybackSource.moviesAPI
+
+    func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat? {
+        Self.url(for: media, season: season, episode: episode).map(PlaybackFormat.embed)
+    }
+
+    static func url(for media: MediaItem, season: Int?, episode: Int?) -> URL? {
         guard let tmdbID = media.tmdbID else { return nil }
         let path: String
         if media.kind == .movie {
             path = "movie/\(tmdbID)"
         } else {
-            guard let season, let episode else { return nil }
+            guard media.kind == .tv, let season, let episode else { return nil }
             path = "tv/\(tmdbID)/\(season)/\(episode)"
         }
-        return URL(string: "https://vidlink.pro/\(path)").map(PlaybackFormat.embed)
+        return URL(string: "https://moviesapi.to/\(path)")
     }
 }
 
@@ -198,6 +237,20 @@ struct MegaPlayAdapter: PlaybackSourceAdapter {
 
 private struct TMDBSearchResponse: Decodable {
     let results: [TMDBResult]
+}
+
+private struct TMDBTVDetailsResponse: Decodable {
+    let seasons: [TMDBSeason]
+}
+
+private struct TMDBSeason: Decodable {
+    let seasonNumber: Int
+    let episodeCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case seasonNumber = "season_number"
+        case episodeCount = "episode_count"
+    }
 }
 
 private struct TMDBResult: Decodable {
