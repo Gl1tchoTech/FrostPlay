@@ -30,8 +30,8 @@ struct MediaItem: Identifiable, Codable, Hashable {
         id: "preview-furiosa",
         title: "Furiosa: A Mad Max Saga",
         overview: "As the world falls, young Furiosa is snatched from the Green Place of Many Mothers and into the hands of a great biker horde led by Dementus.",
-        posterURL: URL(string: "https://image.tmdb.org/t/p/w500/pq完".replacingOccurrences(of: "完", with: "")),
-        backdropURL: nil,
+        posterURL: URL(string: "https://image.tmdb.org/t/p/w500/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg"),
+        backdropURL: URL(string: "https://image.tmdb.org/t/p/w1280/7Zx3wDG5bBtcfk8lcn1d2wVjZQ.jpg"),
         kind: .movie,
         tmdbID: 786892,
         aniListID: nil,
@@ -56,6 +56,9 @@ enum PlaybackSource: String, Codable, CaseIterable, Identifiable {
     case autoEmbed = "AutoEmbed"
 
     var id: String { rawValue }
+
+    static var implemented: [PlaybackSource] { [.vidLink, .megaPlay] }
+
     var supports: Set<MediaKind> {
         switch self {
         case .megaPlay: return [.anime]
@@ -74,7 +77,7 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
 
 struct FrostPlaySettings: Codable {
     var theme: AppTheme = .dark
-    var enabledSources: [PlaybackSource] = [.vidLink, .megaPlay, .vidAPI, .cineSRC, .autoEmbed]
+    var enabledSources: [PlaybackSource] = PlaybackSource.implemented
     var preferredAnimeLanguage = "sub"
     var selectedProvider: String?
 }

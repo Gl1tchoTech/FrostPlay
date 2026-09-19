@@ -7,35 +7,70 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var library: [MediaItem] { didSet { save(library, key: "library") } }
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published var searchResults: [MediaItem] = []
+    @Published var homeItems: [MediaItem] = [.preview]
     @Published var isSearching = false
+    @Published var isLoadingHome = false
     @Published var searchError: String?
+    @Published var homeError: String?
 
-    private let tmdb = TMDBService(apiKey: Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String ?? "")
+    private let tmdb: TMDBService
     private let anilist = AniListService()
+
+    var isTMDBConfigured: Bool { tmdb.isConfigured }
 
     init() {
         settings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
         library = Self.load([MediaItem].self, key: "library") ?? []
         history = Self.load([WatchEntry].self, key: "history") ?? []
+        let info = Bundle.main
+        tmdb = TMDBService(
+            apiKey: info.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String ?? "",
+            readAccessToken: info.object(forInfoDictionaryKey: "TMDB_API_READ_ACCESS_TOKEN") as? String ?? ""
+        )
+    }
+
+    func loadHome() async {
+        guard !isLoadingHome else { return }
+        isLoadingHome = true
+        homeError = nil
+        do {
+            let results = try await tmdb.trending()
+            if !results.isEmpty { homeItems = results }
+        } catch {
+            homeError = error.localizedDescription
+        }
+        isLoadingHome = false
     }
 
     func search(query: String, kind: MediaKind? = nil) async {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { searchResults = []; return }
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty else {
+            searchResults = []
+            searchError = nil
+            return
+        }
+
         isSearching = true
         searchError = nil
-        do {
-            let results: [MediaItem]
-            if kind == .anime { results = try await anilist.search(query: query, kind: .anime) }
-            else if kind == .movie || kind == .tv { results = try await tmdb.search(query: query, kind: kind) }
-            else {
-                let movies = try await tmdb.search(query: query, kind: .movie)
-                let shows = try await tmdb.search(query: query, kind: .tv)
-                let anime = try await anilist.search(query: query, kind: .anime)
-                results = movies + shows + anime
-            }
-            searchResults = results
-        } catch {
-            searchError = "Search is unavailable right now."
+        var results: [MediaItem] = []
+        var failures: [String] = []
+
+        if kind == .anime {
+            do { results = try await anilist.search(query: cleanQuery, kind: .anime) }
+            catch { failures.append("AniList: \(error.localizedDescription)") }
+        } else if let kind {
+            do { results = try await tmdb.search(query: cleanQuery, kind: kind) }
+            catch { failures.append(error.localizedDescription) }
+        } else {
+            do { results += try await tmdb.searchMulti(query: cleanQuery) }
+            catch { failures.append(error.localizedDescription) }
+            do { results += try await anilist.search(query: cleanQuery, kind: .anime) }
+            catch { failures.append("AniList: \(error.localizedDescription)") }
+        }
+
+        searchResults = results
+        if results.isEmpty {
+            searchError = failures.first ?? "No matching titles were found."
         }
         isSearching = false
     }

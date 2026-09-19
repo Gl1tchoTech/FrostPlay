@@ -175,6 +175,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "FrostPlay does not use the camera.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "FrostPlay does not use the local network.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_TMDB_API_KEY = "$(TMDB_API_KEY)";
+				INFOPLIST_KEY_TMDB_API_READ_ACCESS_TOKEN = "$(TMDB_API_READ_ACCESS_TOKEN)";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -182,6 +184,8 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.gl1tchotech.frostplay;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				TMDB_API_KEY = "";
+				TMDB_API_READ_ACCESS_TOKEN = "";
 				SDKROOT = iphoneos;
 				PLATFORM_NAME = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
@@ -206,6 +210,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = FrostPlay;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_TMDB_API_KEY = "$(TMDB_API_KEY)";
+				INFOPLIST_KEY_TMDB_API_READ_ACCESS_TOKEN = "$(TMDB_API_READ_ACCESS_TOKEN)";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarStyle = UIStatusBarStyleLightContent;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -213,6 +219,8 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.gl1tchotech.frostplay;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				TMDB_API_KEY = "";
+				TMDB_API_READ_ACCESS_TOKEN = "";
 				SDKROOT = iphoneos;
 				PLATFORM_NAME = iphoneos;
 				SUPPORTS_MACCATALYST = NO;

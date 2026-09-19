@@ -5,7 +5,7 @@ import WebKit
 struct PlaybackResolver {
     private let adapters: [PlaybackSourceAdapter] = [VidLinkAdapter(), MegaPlayAdapter()]
 
-    func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = nil, episode: Int? = 1) -> PlaybackFormat? {
+    func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1) -> PlaybackFormat? {
         for source in settings.enabledSources {
             guard source.supports.contains(media.kind) else { continue }
             guard let adapter = adapters.first(where: { $0.source == source }) else { continue }
