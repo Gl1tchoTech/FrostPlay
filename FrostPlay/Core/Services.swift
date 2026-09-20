@@ -65,6 +65,28 @@ struct TMDBService: MetadataService {
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: nil) }
     }
 
+    func catalog(for providerID: Int, providerName: String, region: String = "US") async throws -> [MediaItem] {
+        guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
+        async let movies = discover(path: "discover/movie", providerID: providerID, region: region)
+        async let shows = discover(path: "discover/tv", providerID: providerID, region: region)
+        let movieResults = try await movies
+        let showResults = try await shows
+        let movieItems = movieResults.compactMap { makeMediaItem($0, fallbackKind: .movie, providerName: providerName) }
+        let showItems = showResults.compactMap { makeMediaItem($0, fallbackKind: .tv, providerName: providerName) }
+        return movieItems + showItems
+    }
+
+    private func discover(path: String, providerID: Int, region: String) async throws -> [TMDBResult] {
+        let data = try await request(path: path, query: [
+            URLQueryItem(name: "with_watch_providers", value: String(providerID)),
+            URLQueryItem(name: "watch_region", value: region),
+            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "page", value: "1")
+        ])
+        return try decode(TMDBSearchResponse.self, from: data).results
+    }
+
     func seasons(for tvID: Int) async throws -> [SeasonEpisodeInfo] {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
         let data = try await request(path: "tv/\(tvID)", query: [])
@@ -98,7 +120,7 @@ struct TMDBService: MetadataService {
         catch { throw FrostPlayServiceError.decodingFailed }
     }
 
-    private func makeMediaItem(_ result: TMDBResult, fallbackKind: MediaKind?) -> MediaItem? {
+    private func makeMediaItem(_ result: TMDBResult, fallbackKind: MediaKind?, providerName: String? = nil) -> MediaItem? {
         let kind: MediaKind
         let mediaType = result.mediaType ?? fallbackKind?.rawValue ?? ""
         switch mediaType {
@@ -116,7 +138,7 @@ struct TMDBService: MetadataService {
             tmdbID: result.id,
             aniListID: nil,
             malID: nil,
-            providerNames: [],
+            providerNames: providerName.map { [$0] } ?? [],
             year: (result.releaseDate ?? result.firstAirDate)?.prefix(4).description,
             episodeCount: nil
         )

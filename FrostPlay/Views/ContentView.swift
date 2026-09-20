@@ -9,16 +9,17 @@ struct StreamingProvider: Identifiable {
     let name: String
     let accent: Color
     let logoURL: URL?
+    let tmdbProviderID: Int?
 }
 
 private enum ProviderCatalog {
     static let providers: [StreamingProvider] = [
-        StreamingProvider(id: "all", name: "All", accent: .orange, logoURL: nil),
-        StreamingProvider(id: "netflix", name: "Netflix", accent: Color(red: 0.85, green: 0.02, blue: 0.04), logoURL: URL(string: "https://cdn.simpleicons.org/netflix/FFFFFF")),
-        StreamingProvider(id: "disney", name: "Disney+", accent: Color(red: 0.08, green: 0.25, blue: 0.65), logoURL: URL(string: "https://cdn.simpleicons.org/disneyplus/FFFFFF")),
-        StreamingProvider(id: "hulu", name: "Hulu", accent: Color(red: 0.15, green: 0.65, blue: 0.42), logoURL: URL(string: "https://cdn.simpleicons.org/hulu/FFFFFF")),
-        StreamingProvider(id: "max", name: "Max", accent: Color(red: 0.28, green: 0.18, blue: 0.65), logoURL: URL(string: "https://cdn.simpleicons.org/max/FFFFFF")),
-        StreamingProvider(id: "prime", name: "Prime", accent: Color(red: 0.05, green: 0.35, blue: 0.7), logoURL: URL(string: "https://cdn.simpleicons.org/primevideo/FFFFFF"))
+        StreamingProvider(id: "all", name: "All", accent: .orange, logoURL: nil, tmdbProviderID: nil),
+        StreamingProvider(id: "netflix", name: "Netflix", accent: Color(red: 0.85, green: 0.02, blue: 0.04), logoURL: URL(string: "https://cdn.simpleicons.org/netflix/FFFFFF"), tmdbProviderID: 8),
+        StreamingProvider(id: "disney", name: "Disney+", accent: Color(red: 0.08, green: 0.25, blue: 0.65), logoURL: URL(string: "https://cdn.simpleicons.org/disneyplus/FFFFFF"), tmdbProviderID: 337),
+        StreamingProvider(id: "hulu", name: "Hulu", accent: Color(red: 0.15, green: 0.65, blue: 0.42), logoURL: URL(string: "https://cdn.simpleicons.org/hulu/FFFFFF"), tmdbProviderID: 15),
+        StreamingProvider(id: "max", name: "Max", accent: Color(red: 0.28, green: 0.18, blue: 0.65), logoURL: URL(string: "https://cdn.simpleicons.org/max/FFFFFF"), tmdbProviderID: 1899),
+        StreamingProvider(id: "prime", name: "Prime Video", accent: Color(red: 0.05, green: 0.35, blue: 0.7), logoURL: URL(string: "https://cdn.simpleicons.org/primevideo/FFFFFF"), tmdbProviderID: 9)
     ]
 }
 
@@ -70,11 +71,8 @@ struct HomeView: View {
     @EnvironmentObject private var store: FrostPlayStore
     @State private var selectedProvider: StreamingProvider = ProviderCatalog.providers[0]
 
-    private var hero: MediaItem { store.homeItems.first ?? .preview }
-    private var visibleItems: [MediaItem] {
-        guard selectedProvider.id != "all" else { return store.homeItems }
-        return store.homeItems.filter { $0.providerNames.contains(selectedProvider.name) }
-    }
+    private var hero: MediaItem { (selectedProvider.id == "all" ? store.homeItems : store.providerItems).first ?? .preview }
+    private var visibleItems: [MediaItem] { selectedProvider.id == "all" ? store.homeItems : store.providerItems }
 
     var body: some View {
         NavigationStack {
@@ -92,9 +90,10 @@ struct HomeView: View {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 9) {
                                     ForEach(ProviderCatalog.providers) { provider in
-                                        ProviderChip(provider: provider, selected: selectedProvider.id == provider.id) {
+                                        ProviderChip(provider: provider, selected: selectedProvider.id == provider.id, isLoading: selectedProvider.id == provider.id && store.isLoadingProvider) {
                                             selectedProvider = provider
                                             store.settings.selectedProvider = provider.id == "all" ? nil : provider.name
+                                            Task { await store.loadProviderCatalog(provider) }
                                         }
                                     }
                                 }
@@ -107,6 +106,8 @@ struct HomeView: View {
 
                         if store.isLoadingHome { ProgressView("Loading catalog…").tint(frostOrange) }
                         if let error = store.homeError, store.isTMDBConfigured { NoticeCard(title: "Catalog unavailable", message: error, systemImage: "wifi.exclamationmark") }
+                        if selectedProvider.id != "all", let error = store.providerError { NoticeCard(title: "\(selectedProvider.name) unavailable", message: error, systemImage: "wifi.exclamationmark") }
+                        if selectedProvider.id != "all", !store.isLoadingProvider, store.providerItems.isEmpty, store.providerError == nil { NoticeCard(title: "No titles found", message: "TMDB did not return titles for this service in the US catalog.", systemImage: "film") }
 
                         HeroCard(media: hero)
                         ContentRail(title: "Continue Watching", items: store.history.map(\.media), progress: true)
@@ -130,19 +131,29 @@ struct HomeView: View {
 struct ProviderChip: View {
     let provider: StreamingProvider
     let selected: Bool
+    let isLoading: Bool
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 7) {
-                ProviderLogo(provider: provider, size: 24)
-                Text(provider.name).font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    ProviderLogo(provider: provider, size: 34)
+                    Spacer()
+                    if isLoading { ProgressView().tint(.white).scaleEffect(0.8) }
+                    else { Image(systemName: selected ? "checkmark.circle.fill" : "arrow.up.right").font(.caption.bold()) }
+                }
+                Text(provider.name).font(.subheadline.weight(.bold)).lineLimit(1)
+                Text(provider.id == "all" ? "All titles" : "Open catalog").font(.caption2).foregroundStyle(.white.opacity(0.58))
             }
-            .foregroundStyle(selected ? .black : .white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(selected ? Color.white : frostPanel)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(.white.opacity(selected ? 0 : 0.14)))
+            .foregroundStyle(.white)
+            .padding(13)
+            .frame(width: 132, height: 104, alignment: .leading)
+            .background(
+                LinearGradient(colors: [provider.accent.opacity(selected ? 0.92 : 0.52), frostPanel], startPoint: .topLeading, endPoint: .bottomTrailing)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(selected ? 0.7 : 0.14), lineWidth: selected ? 1.5 : 1))
+            .shadow(color: provider.accent.opacity(selected ? 0.32 : 0.08), radius: selected ? 12 : 5, y: 5)
         }
         .buttonStyle(.plain)
     }
@@ -154,7 +165,7 @@ struct ProviderLogo: View {
     var body: some View {
         Group {
             if let url = provider.logoURL {
-                AsyncImage(url: url) { image in image.resizable().scaledToFit().padding(4) } placeholder: { Text(String(provider.name.prefix(1))).font(.caption.bold()) }
+                AsyncImage(url: url) { image in image.resizable().scaledToFit().padding(5) } placeholder: { Text(String(provider.name.prefix(1))).font(.caption.bold()) }
             } else { Image(systemName: "square.grid.2x2.fill").font(.caption) }
         }
         .frame(width: size, height: size)

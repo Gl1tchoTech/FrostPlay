@@ -8,10 +8,13 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published var searchResults: [MediaItem] = []
     @Published var homeItems: [MediaItem] = [.preview]
+    @Published var providerItems: [MediaItem] = []
     @Published var isSearching = false
     @Published var isLoadingHome = false
+    @Published var isLoadingProvider = false
     @Published var searchError: String?
     @Published var homeError: String?
+    @Published var providerError: String?
 
     private let anilist = AniListService()
 
@@ -42,6 +45,28 @@ final class FrostPlayStore: ObservableObject {
             homeError = error.localizedDescription
         }
         isLoadingHome = false
+    }
+
+    func loadProviderCatalog(_ provider: StreamingProvider) async {
+        guard provider.id != "all", let providerID = provider.tmdbProviderID else {
+            providerItems = []
+            providerError = nil
+            isLoadingProvider = false
+            return
+        }
+        isLoadingProvider = true
+        providerError = nil
+        do {
+            let items = try await tmdb.catalog(for: providerID, providerName: provider.name)
+            guard settings.selectedProvider == provider.name else { return }
+            providerItems = items
+            if providerItems.isEmpty { providerError = "No titles were returned for this service in the US region." }
+        } catch {
+            guard settings.selectedProvider == provider.name else { return }
+            providerItems = []
+            providerError = error.localizedDescription
+        }
+        if settings.selectedProvider == provider.name { isLoadingProvider = false }
     }
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
