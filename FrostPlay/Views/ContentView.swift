@@ -551,7 +551,48 @@ struct DetailView: View {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
                 Text(media.title).font(.largeTitle.bold()).foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
-                HStack {                Button(store.isInLibrary(media) ? "Saved" : "Add to My List") { store.toggleLibrary(media) }.buttonStyle(.borderedProminent); NavigationLink("Play") { PlayerView(media: media) }.buttonStyle(.bordered); Button("Sources") { showingSourcePicker = true }.buttonStyle(.bordered) }
+                HStack(spacing: 10) {
+                    Button {
+                        store.toggleLibrary(media)
+                    } label: {
+                        Label(store.isInLibrary(media) ? "Saved" : "Add to My List", systemImage: store.isInLibrary(media) ? "checkmark" : "bookmark")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 10)
+                            .background(frostOrange)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    NavigationLink {
+                        PlayerView(media: media, season: selectedSeason, episode: selectedEpisode)
+                    } label: {
+                        Label("Play", systemImage: "play.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 10)
+                            .background(frostPanel)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        showingSourcePicker = true
+                    } label: {
+                        Image(systemName: "rectangle.2.swap")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: 40)
+                            .background(frostPanel)
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Choose source")
+                }
                 if media.kind == .tv || media.kind == .anime { EpisodePanel(media: media, seasons: $seasons, selectedSeason: $selectedSeason, selectedEpisode: $selectedEpisode, isLoading: $isLoadingEpisodes) }
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 Text(media.providerNames.isEmpty ? "Source availability is limited for this title." : "Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(media.providerNames.isEmpty ? .orange : frostOrange)
