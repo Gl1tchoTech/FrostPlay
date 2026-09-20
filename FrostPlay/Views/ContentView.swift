@@ -74,6 +74,18 @@ struct HomeView: View {
     private var hero: MediaItem { (selectedProvider.id == "all" ? store.homeItems : store.providerItems).first ?? .preview }
     private var visibleItems: [MediaItem] { selectedProvider.id == "all" ? store.homeItems : store.providerItems }
 
+    @ViewBuilder
+    private func homeSectionView(_ section: HomeSection) -> some View {
+        switch section {
+        case .continueWatching:
+            ContentRail(title: section.title, items: store.history.map(\.media), progress: true)
+        case .popular:
+            ContentRail(title: section.title, items: visibleItems, onReachedEnd: { Task { if selectedProvider.id == "all" { await store.loadMoreHome() } else { await store.loadMoreProviderCatalog(selectedProvider) } } })
+        case .myList:
+            ContentRail(title: section.title, items: store.library)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             AdaptiveBackdrop(media: hero) {
@@ -110,9 +122,9 @@ struct HomeView: View {
                         if selectedProvider.id != "all", !store.isLoadingProvider, store.providerItems.isEmpty, store.providerError == nil { NoticeCard(title: "No titles found", message: "TMDB did not return titles for this service in the US catalog.", systemImage: "film") }
 
                         HeroCard(media: hero)
-                        ContentRail(title: "Continue Watching", items: store.history.map(\.media), progress: true)
-                        ContentRail(title: "Popular Right Now", items: visibleItems)
-                        ContentRail(title: "Your List", items: store.library)
+                        ForEach(store.settings.homeSections) { section in
+                            homeSectionView(section)
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
@@ -288,6 +300,7 @@ struct AnimeIntroCard: View {
 
 struct PosterGrid: View {
     let items: [MediaItem]
+    var onReachedEnd: (() -> Void)? = nil
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 18) {
             ForEach(items) { media in
@@ -303,6 +316,7 @@ struct PosterGrid: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .onAppear { if media.id == items.last?.id { onReachedEnd?() } }
             }
         }
     }
@@ -326,7 +340,7 @@ struct SearchView: View {
                     if store.isSearching { ProgressView("Searching…").tint(frostOrange).padding(.top, 30) }
                     else if let error = store.searchError { NoticeCard(title: "Search unavailable", message: error, systemImage: "magnifyingglass") }
                     else if store.searchResults.isEmpty { ContentUnavailableView("Start exploring", systemImage: "sparkles", description: Text("Search the TMDB and AniList catalogs.")) }
-                    else { ScrollView { PosterGrid(items: store.searchResults).padding(.top, 4) } }
+                    else { ScrollView { PosterGrid(items: store.searchResults, onReachedEnd: { Task { await store.loadMoreSearchResults() } }).padding(.top, 4); if store.isLoadingMore { ProgressView("Loading more…").tint(frostOrange).frame(maxWidth: .infinity).padding() } } }
                     Spacer(minLength: 0)
                 }
                 .padding(16)
@@ -371,6 +385,7 @@ struct SettingsView: View {
                 NavigationLink { SubtitleSettingsView() } label: { SettingsRow(icon: "captions.bubble", title: "Subtitles", subtitle: "Native player, color, and sizing") }
                 NavigationLink { CatalogSettingsView() } label: { SettingsRow(icon: "key", title: "Catalog & API", subtitle: store.isTMDBConfigured ? "TMDB connected" : "TMDB key required") }
                 NavigationLink { SourceSettingsView() } label: { SettingsRow(icon: "arrow.triangle.2.circlepath", title: "Sources", subtitle: "Priority and availability") }
+                NavigationLink { HomeSectionsSettingsView() } label: { SettingsRow(icon: "rectangle.3.group", title: "Home sections", subtitle: "Choose and reorder Home rails") }
             }
             .scrollContentBackground(.hidden)
             .background(frostBackground)
@@ -472,6 +487,32 @@ struct CatalogSettingsView: View {
     }
 }
 
+struct HomeSectionsSettingsView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    var body: some View {
+        List {
+            Section("Visible sections") {
+                ForEach(HomeSection.allCases) { section in
+                    Toggle(section.title, isOn: Binding(get: { store.settings.homeSections.contains(section) }, set: { enabled in
+                        if enabled {
+                            if !store.settings.homeSections.contains(section) { store.settings.homeSections.append(section) }
+                        } else {
+                            store.settings.homeSections.removeAll { $0 == section }
+                        }
+                    }))
+                }
+                Text("Use Edit to drag sections into the order you want on Home.").font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Order") {
+                ForEach(store.settings.homeSections) { section in Text(section.title) }
+                    .onMove { store.settings.homeSections.move(fromOffsets: $0, toOffset: $1) }
+            }
+        }
+        .navigationTitle("Home sections")
+        .toolbar { EditButton() }
+    }
+}
+
 struct SourceSettingsView: View {
     @EnvironmentObject private var store: FrostPlayStore
     var body: some View {
@@ -534,9 +575,30 @@ struct ContentRail: View {
     let title: String
     let items: [MediaItem]
     var progress = false
+    var onReachedEnd: (() -> Void)? = nil
+
     var body: some View {
-        if !items.isEmpty { VStack(alignment: .leading, spacing: 10) { Text(title).font(.title3.bold()).foregroundStyle(.white); ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) { ForEach(items) { media in NavigationLink(destination: DetailView(media: media)) { VStack(alignment: .leading, spacing: 6) { Poster(url: media.posterURL, width: 106, height: 150); Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white); if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) } } }.buttonStyle(.plain) } } } }    }
-}
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title).font(.title3.bold()).foregroundStyle(.white)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(items) { media in
+                            NavigationLink(destination: DetailView(media: media)) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Poster(url: media.posterURL, width: 106, height: 150)
+                                    Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white)
+                                    if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .onAppear { if media.id == items.last?.id { onReachedEnd?() } }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct Poster: View {
@@ -576,19 +638,21 @@ struct DetailView: View {
                     }
                     .buttonStyle(.plain)
 
-                    NavigationLink {
-                        PlayerView(media: media, season: selectedSeason, episode: selectedEpisode)
-                    } label: {
-                        Label("Play", systemImage: "play.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 10)
-                            .background(frostPanel)
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(.white.opacity(0.18)))
+                    if media.kind == .movie {
+                        NavigationLink {
+                            PlayerView(media: media)
+                        } label: {
+                            Label("Play", systemImage: "play.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 10)
+                                .background(frostPanel)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(.white.opacity(0.18)))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
 
                     Button {
                         showingSourcePicker = true
@@ -625,16 +689,65 @@ struct EpisodePanel: View {
     @Binding var selectedSeason: Int
     @Binding var selectedEpisode: Int
     @Binding var isLoading: Bool
-    private var count: Int { seasons.first(where: { $0.season == selectedSeason })?.episodeCount ?? media.episodeCount ?? 1 }
+
+    private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
+    private var episodes: [EpisodeInfo] {
+        if let episodes = currentSeason?.episodes, !episodes.isEmpty { return episodes }
+        let count = currentSeason?.episodeCount ?? media.episodeCount ?? 0
+        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode description unavailable.", airDate: nil) }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack { Text("Episodes").font(.headline); Spacer(); if isLoading { ProgressView().tint(frostOrange) } else { Text("S\(selectedSeason) · \(count) episodes").font(.caption).foregroundStyle(.secondary) } }
-            if seasons.count > 1 { Picker("Season", selection: $selectedSeason) { ForEach(seasons) { Text("Season \($0.season)").tag($0.season) } }.pickerStyle(.menu).tint(frostOrange) }
-            if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. You can still try Episode 1 or switch sources.").font(.caption).foregroundStyle(.orange) }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 58), spacing: 8)], spacing: 8) { ForEach(1...max(count, 1), id: \.self) { episode in Button { selectedEpisode = episode } label: { VStack(spacing: 3) { Text("E\(episode)").font(.subheadline.bold()); Text(episode == selectedEpisode ? "Selected" : "Ready").font(.caption2).foregroundStyle(.secondary) }.frame(maxWidth: .infinity).padding(.vertical, 11).background(selectedEpisode == episode ? frostOrange : frostPanel).foregroundStyle(selectedEpisode == episode ? .black : .white).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous)) } } }
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                Text("Episodes").font(.headline).foregroundStyle(.white)
+                Spacer()
+                if isLoading { ProgressView().tint(frostOrange) }
+                else { Text("S\(selectedSeason) · \(episodes.count) episodes").font(.caption).foregroundStyle(.secondary) }
+            }
+            if seasons.count > 1 {
+                Picker("Season", selection: $selectedSeason) {
+                    ForEach(seasons) { season in Text("Season \(season.season)").tag(season.season) }
+                }
+                .pickerStyle(.menu)
+                .tint(frostOrange)
+                .onChange(of: selectedSeason) { _, _ in selectedEpisode = 1 }
+            }
+            if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. Try another title or source.").font(.caption).foregroundStyle(.orange) }
+            LazyVStack(spacing: 9) {
+                ForEach(episodes) { episode in
+                    NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number)) {
+                        HStack(alignment: .top, spacing: 11) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 9, style: .continuous).fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.12))
+                                Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? .black : .white)
+                            }.frame(width: 48, height: 40)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(episode.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
+                                Text(episode.overview.isEmpty ? "No description available." : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
+                            }
+                            Spacer()
+                            Image(systemName: "play.fill").font(.caption).foregroundStyle(frostOrange)
+                        }
+                        .padding(10)
+                        .background(episode.number == selectedEpisode ? frostOrange.opacity(0.14) : Color.white.opacity(0.045))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(TapGesture().onEnded { selectedEpisode = episode.number })
+                }
+            }
         }
-        .padding(14).background(frostPanel).clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
-        .task { isLoading = true; seasons = await store.episodeCatalog(for: media); if let first = seasons.first { selectedSeason = first.season }; isLoading = false }
+        .padding(14)
+        .background(frostPanel)
+        .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .task {
+            isLoading = true
+            seasons = await store.episodeCatalog(for: media)
+            if let first = seasons.first, !seasons.contains(where: { $0.season == selectedSeason }) { selectedSeason = first.season }
+            isLoading = false
+        }
     }
 }
 

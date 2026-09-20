@@ -50,13 +50,22 @@ struct WatchEntry: Identifiable, Codable, Hashable {
     var lastPlayed: Date
 }
 
-struct SeasonEpisodeInfo: Identifiable, Hashable {
+struct EpisodeInfo: Identifiable, Hashable, Codable {
+    let number: Int
+    let name: String
+    let overview: String
+    let airDate: String?
+    var id: Int { number }
+}
+
+struct SeasonEpisodeInfo: Identifiable, Hashable, Codable {
     let season: Int
     let episodeCount: Int
+    var episodes: [EpisodeInfo] = []
     var id: Int { season }
 }
 
-enum PlaybackSource: String, Codable, CaseIterable, Identifiable {
+enum PlaybackSource: String, Codable, CaseIterable, Identifiable, Hashable {
     case vidLink = "VidLink"
     case megaPlay = "MegaPlay"
     case vidAPI = "VidAPI"
@@ -66,12 +75,14 @@ enum PlaybackSource: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    static var implemented: [PlaybackSource] { [.megaPlay, .vidLink, .moviesAPI] }
+    // Only sources with verified identifier contracts are exposed in the app.
+    static var implemented: [PlaybackSource] { [.megaPlay, .moviesAPI] }
 
     var supports: Set<MediaKind> {
         switch self {
         case .megaPlay: return [.anime]
-        default: return [.movie, .tv]
+        case .moviesAPI: return [.movie, .tv]
+        default: return []
         }
     }
 }
@@ -107,4 +118,55 @@ struct FrostPlaySettings: Codable {
     var preferredQuality = "1080p"
     var subtitleUseNativePlayer = false
     var subtitleColor = "white"
+    var homeSections: [HomeSection] = HomeSection.defaultOrder
+
+    enum CodingKeys: String, CodingKey {
+        case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = FrostPlaySettings()
+        tmdbAPIKey = try container.decodeIfPresent(String.self, forKey: .tmdbAPIKey) ?? defaults.tmdbAPIKey
+        tmdbReadAccessToken = try container.decodeIfPresent(String.self, forKey: .tmdbReadAccessToken) ?? defaults.tmdbReadAccessToken
+        theme = try container.decodeIfPresent(AppTheme.self, forKey: .theme) ?? defaults.theme
+        enabledSources = try container.decodeIfPresent([PlaybackSource].self, forKey: .enabledSources) ?? defaults.enabledSources
+        preferredAnimeLanguage = try container.decodeIfPresent(String.self, forKey: .preferredAnimeLanguage) ?? defaults.preferredAnimeLanguage
+        selectedProvider = try container.decodeIfPresent(String.self, forKey: .selectedProvider)
+        textScale = try container.decodeIfPresent(Double.self, forKey: .textScale) ?? defaults.textScale
+        boldText = try container.decodeIfPresent(Bool.self, forKey: .boldText) ?? defaults.boldText
+        backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity) ?? defaults.backgroundOpacity
+        backgroundBlur = try container.decodeIfPresent(Double.self, forKey: .backgroundBlur) ?? defaults.backgroundBlur
+        lineSpacing = try container.decodeIfPresent(Double.self, forKey: .lineSpacing) ?? defaults.lineSpacing
+        reduceMotion = try container.decodeIfPresent(Bool.self, forKey: .reduceMotion) ?? defaults.reduceMotion
+        showImageLogos = try container.decodeIfPresent(Bool.self, forKey: .showImageLogos) ?? defaults.showImageLogos
+        backdropTrailers = try container.decodeIfPresent(Bool.self, forKey: .backdropTrailers) ?? defaults.backdropTrailers
+        autoHideHeader = try container.decodeIfPresent(Bool.self, forKey: .autoHideHeader) ?? defaults.autoHideHeader
+        autoplayNextEpisode = try container.decodeIfPresent(Bool.self, forKey: .autoplayNextEpisode) ?? defaults.autoplayNextEpisode
+        autoSkipIntro = try container.decodeIfPresent(Bool.self, forKey: .autoSkipIntro) ?? defaults.autoSkipIntro
+        autoSubtitles = try container.decodeIfPresent(Bool.self, forKey: .autoSubtitles) ?? defaults.autoSubtitles
+        preferredQuality = try container.decodeIfPresent(String.self, forKey: .preferredQuality) ?? defaults.preferredQuality
+        subtitleUseNativePlayer = try container.decodeIfPresent(Bool.self, forKey: .subtitleUseNativePlayer) ?? defaults.subtitleUseNativePlayer
+        subtitleColor = try container.decodeIfPresent(String.self, forKey: .subtitleColor) ?? defaults.subtitleColor
+        homeSections = try container.decodeIfPresent([HomeSection].self, forKey: .homeSections) ?? defaults.homeSections
+    }
+}
+
+enum HomeSection: String, Codable, CaseIterable, Identifiable {
+    case continueWatching
+    case popular
+    case myList
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .continueWatching: return "Continue Watching"
+        case .popular: return "Popular Right Now"
+        case .myList: return "Your List"
+        }
+    }
+
+    static let defaultOrder: [HomeSection] = [.continueWatching, .popular, .myList]
 }

@@ -3,10 +3,12 @@ import SwiftUI
 import WebKit
 
 struct PlaybackResolver {
-    private let adapters: [PlaybackSourceAdapter] = [MegaPlayAdapter(), VidLinkAdapter(), MoviesAPIAdapter()]
+    private let adapters: [PlaybackSourceAdapter] = [MegaPlayAdapter(), MoviesAPIAdapter()]
 
     func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1) -> PlaybackFormat? {
-        let orderedSources = settings.enabledSources.filter { $0.supports.contains(media.kind) }
+        // Keep provider contracts strict: AniList IDs never enter TMDB sources and vice versa.
+        let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.moviesAPI]
+        let orderedSources = settings.enabledSources.filter { allowed.contains($0) }
         for source in orderedSources {
             guard source.supports.contains(media.kind) else { continue }
             guard let adapter = adapters.first(where: { $0.source == source }) else { continue }

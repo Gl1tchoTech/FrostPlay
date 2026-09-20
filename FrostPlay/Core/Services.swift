@@ -18,7 +18,7 @@ enum FrostPlayServiceError: LocalizedError {
 }
 
 protocol MetadataService {
-    func search(query: String, kind: MediaKind?) async throws -> [MediaItem]
+    func search(query: String, kind: MediaKind?, page: Int) async throws -> [MediaItem]
 }
 
 struct TMDBService: MetadataService {
@@ -31,44 +31,46 @@ struct TMDBService: MetadataService {
         !readAccessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    func search(query: String, kind: MediaKind?) async throws -> [MediaItem] {
+    func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
         let endpoint: String
         if let kind {
             endpoint = kind == .tv ? "search/tv" : "search/movie"
         } else {
-            return try await searchMulti(query: query)
+            return try await searchMulti(query: query, page: page)
         }
 
         let data = try await request(path: endpoint, query: [
             URLQueryItem(name: "query", value: query),
-            URLQueryItem(name: "include_adult", value: "false")
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "page", value: String(page))
         ])
         let payload = try decode(TMDBSearchResponse.self, from: data)
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: kind) }
     }
 
-    func searchMulti(query: String) async throws -> [MediaItem] {
+    func searchMulti(query: String, page: Int = 1) async throws -> [MediaItem] {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
         let data = try await request(path: "search/multi", query: [
             URLQueryItem(name: "query", value: query),
-            URLQueryItem(name: "include_adult", value: "false")
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "page", value: String(page))
         ])
         let payload = try decode(TMDBSearchResponse.self, from: data)
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: nil) }
     }
 
-    func trending() async throws -> [MediaItem] {
+    func trending(page: Int = 1) async throws -> [MediaItem] {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
-        let data = try await request(path: "trending/all/week", query: [])
+        let data = try await request(path: "trending/all/week", query: [URLQueryItem(name: "page", value: String(page))])
         let payload = try decode(TMDBSearchResponse.self, from: data)
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: nil) }
     }
 
-    func catalog(for providerID: Int, providerName: String, region: String = "US") async throws -> [MediaItem] {
+    func catalog(for providerID: Int, providerName: String, region: String = "US", page: Int = 1) async throws -> [MediaItem] {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
-        async let movies = discover(path: "discover/movie", providerID: providerID, region: region)
-        async let shows = discover(path: "discover/tv", providerID: providerID, region: region)
+        async let movies = discover(path: "discover/movie", providerID: providerID, region: region, page: page)
+        async let shows = discover(path: "discover/tv", providerID: providerID, region: region, page: page)
         let movieResults = try await movies
         let showResults = try await shows
         let movieItems = movieResults.compactMap { makeMediaItem($0, fallbackKind: .movie, providerName: providerName) }
@@ -76,13 +78,13 @@ struct TMDBService: MetadataService {
         return movieItems + showItems
     }
 
-    private func discover(path: String, providerID: Int, region: String) async throws -> [TMDBResult] {
+    private func discover(path: String, providerID: Int, region: String, page: Int) async throws -> [TMDBResult] {
         let data = try await request(path: path, query: [
             URLQueryItem(name: "with_watch_providers", value: String(providerID)),
             URLQueryItem(name: "watch_region", value: region),
             URLQueryItem(name: "sort_by", value: "popularity.desc"),
             URLQueryItem(name: "include_adult", value: "false"),
-            URLQueryItem(name: "page", value: "1")
+            URLQueryItem(name: "page", value: String(page))
         ])
         return try decode(TMDBSearchResponse.self, from: data).results
     }
@@ -91,9 +93,16 @@ struct TMDBService: MetadataService {
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
         let data = try await request(path: "tv/\(tvID)", query: [])
         let payload = try decode(TMDBTVDetailsResponse.self, from: data)
-        return payload.seasons
-            .filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
-            .map { SeasonEpisodeInfo(season: $0.seasonNumber, episodeCount: $0.episodeCount) }
+        var seasons: [SeasonEpisodeInfo] = []
+        for season in payload.seasons where season.seasonNumber > 0 && season.episodeCount > 0 {
+            let episodeData = try? await request(path: "tv/\(tvID)/season/\(season.seasonNumber)", query: [])
+            let episodePayload = episodeData.flatMap { try? decode(TMDBSeasonDetailResponse.self, from: $0) }
+            let episodes = episodePayload?.episodes.map { episode in
+                EpisodeInfo(number: episode.episodeNumber, name: episode.name, overview: episode.overview ?? "", airDate: episode.airDate)
+            } ?? []
+            seasons.append(SeasonEpisodeInfo(season: season.seasonNumber, episodeCount: season.episodeCount, episodes: episodes))
+        }
+        return seasons
     }
 
     private func request(path: String, query: [URLQueryItem]) async throws -> Data {
@@ -138,7 +147,7 @@ struct TMDBService: MetadataService {
             tmdbID: result.id,
             aniListID: nil,
             malID: nil,
-            providerNames: providerName.map { [$0] } ?? [],
+            providerNames: providerName.map { [$0] } ?? [PlaybackSource.moviesAPI.rawValue],
             year: (result.releaseDate ?? result.firstAirDate)?.prefix(4).description,
             episodeCount: nil
         )
@@ -149,11 +158,11 @@ struct AniListService: MetadataService {
     let session: URLSession = .shared
     let endpoint = URL(string: "https://graphql.anilist.co")!
 
-    func search(query: String, kind: MediaKind?) async throws -> [MediaItem] {
+    func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
         let request = URLRequestBuilder.postJSON(url: endpoint, body: [
             "query": """
-            query ($search: String) {
-              Page(perPage: 20) {
+            query ($search: String, $page: Int) {
+              Page(page: $page, perPage: 20) {
                 media(search: $search, type: ANIME, sort: POPULARITY_DESC) {
                   id
                   idMal
@@ -167,7 +176,7 @@ struct AniListService: MetadataService {
               }
             }
             """,
-            "variables": ["search": query]
+            "variables": ["search": query, "page": page]
         ])
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
@@ -265,6 +274,10 @@ private struct TMDBTVDetailsResponse: Decodable {
     let seasons: [TMDBSeason]
 }
 
+private struct TMDBSeasonDetailResponse: Decodable {
+    let episodes: [TMDBEpisode]
+}
+
 private struct TMDBSeason: Decodable {
     let seasonNumber: Int
     let episodeCount: Int
@@ -272,6 +285,19 @@ private struct TMDBSeason: Decodable {
     enum CodingKeys: String, CodingKey {
         case seasonNumber = "season_number"
         case episodeCount = "episode_count"
+    }
+}
+
+private struct TMDBEpisode: Decodable {
+    let episodeNumber: Int
+    let name: String
+    let overview: String?
+    let airDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case episodeNumber = "episode_number"
+        case name, overview
+        case airDate = "air_date"
     }
 }
 
