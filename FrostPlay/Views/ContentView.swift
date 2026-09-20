@@ -524,7 +524,8 @@ struct ContentRail: View {
     let items: [MediaItem]
     var progress = false
     var body: some View {
-        if !items.isEmpty { VStack(alignment: .leading, spacing: 10) { Text(title).font(.title3.bold()).foregroundStyle(.white); ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) { ForEach(items) { media in NavigationLink(destination: DetailView(media: media)) { VStack(alignment: .leading, spacing: 6) { Poster(url: media.posterURL, width: 106, height: 150); Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white); if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) } } }.buttonStyle(.plain) } } } } }
+        if !items.isEmpty { VStack(alignment: .leading, spacing: 10) { Text(title).font(.title3.bold()).foregroundStyle(.white); ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) { ForEach(items) { media in NavigationLink(destination: DetailView(media: media)) { VStack(alignment: .leading, spacing: 6) { Poster(url: media.posterURL, width: 106, height: 150); Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white); if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) } } }.buttonStyle(.plain) } } } }    }
+}
 }
 
 struct Poster: View {
