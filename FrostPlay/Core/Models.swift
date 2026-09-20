@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-enum MediaKind: String, Codable, CaseIterable, Identifiable {
+enum MediaKind: String, Codable, CaseIterable, Identifiable, Hashable {
     case movie, tv, anime
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
@@ -86,10 +86,25 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
 
 struct FrostPlaySettings: Codable {
     // This default is user-configurable in Settings and is intentionally stored locally.
-    var tmdbAPIKey = "0cb8d58d39349ca2aa7438f9fd10282a"
+    var tmdbAPIKey = (Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String) ?? ""
     var tmdbReadAccessToken = ""
     var theme: AppTheme = .dark
     var enabledSources: [PlaybackSource] = PlaybackSource.implemented
     var preferredAnimeLanguage = "sub"
     var selectedProvider: String?
+    var textScale = 1.0
+    var boldText = false
+    var backgroundOpacity = 0.4
+    var backgroundBlur = 18.0
+    var lineSpacing = 1.5
+    var reduceMotion = false
+    var showImageLogos = true
+    var backdropTrailers = false
+    var autoHideHeader = true
+    var autoplayNextEpisode = true
+    var autoSkipIntro = false
+    var autoSubtitles = false
+    var preferredQuality = "1080p"
+    var subtitleUseNativePlayer = false
+    var subtitleColor = "white"
 }
