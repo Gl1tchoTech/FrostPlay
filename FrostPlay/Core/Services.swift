@@ -8,7 +8,7 @@ enum FrostPlayServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingTMDBCredential:
-            return "TMDB is not configured. Add TMDB_API_KEY to the app target settings to browse movies and TV."
+            return "TMDB is not configured. Add or replace the key in Settings → Catalog & API to browse movies and TV."
         case .invalidResponse:
             return "The service returned an invalid response."
         case .decodingFailed:

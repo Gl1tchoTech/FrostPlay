@@ -79,10 +79,19 @@ struct HomeView: View {
         switch section {
         case .continueWatching:
             ContentRail(title: section.title, items: store.history.map(\.media), progress: true)
+                .padding(14)
+                .background(frostPanel.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         case .popular:
             ContentRail(title: section.title, items: visibleItems, onReachedEnd: { Task { if selectedProvider.id == "all" { await store.loadMoreHome() } else { await store.loadMoreProviderCatalog(selectedProvider) } } })
+                .padding(14)
+                .background(frostPanel.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         case .myList:
             ContentRail(title: section.title, items: store.library)
+                .padding(14)
+                .background(frostPanel.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
     }
 
@@ -92,9 +101,13 @@ struct HomeView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 25) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("FROSTPLAY").font(.caption.bold()).tracking(3).foregroundStyle(frostOrange)
+                            HStack(spacing: 8) {
+                                Text("FROSTPLAY").font(.caption.bold()).tracking(3).foregroundStyle(frostOrange)
+                                Spacer()
+                                Text("PRIVATE LIBRARY").font(.caption2.bold()).tracking(1.2).foregroundStyle(.white.opacity(0.38))
+                            }
                             Text("Find your next watch.").font(.system(size: 31, weight: .bold, design: .rounded)).foregroundStyle(.white)
-                            Text("Browse services, save favorites, and pick up where you left off.").font(.subheadline).foregroundStyle(.white.opacity(0.58))
+                            Text("Browse services, save favorites, and pick up where you left off.").font(.subheadline).foregroundStyle(.white.opacity(0.58)).fixedSize(horizontal: false, vertical: true)
                         }
 
                         VStack(alignment: .leading, spacing: 10) {
@@ -133,7 +146,17 @@ struct HomeView: View {
             }
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { NavigationLink(destination: SettingsView()) { Image(systemName: "gearshape") } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: HomeSectionsSettingsView()) {
+                        Image(systemName: "rectangle.3.group")
+                    }
+                    .accessibilityLabel("Customize Home sections")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(destination: SettingsView()) { Image(systemName: "gearshape") }
+                }
+            }
             .task { await store.loadHome() }
         }
         .preferredColorScheme(.dark)
@@ -624,6 +647,15 @@ struct DetailView: View {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
                 Text(media.title).font(.largeTitle.bold()).foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    DetailBadge(label: media.kind == .anime ? "AniList" : "TMDB", icon: "checkmark.seal.fill")
+                    if let episodeCount = media.episodeCount, episodeCount > 0 {
+                        DetailBadge(label: "\(episodeCount) episodes", icon: "list.number")
+                    }
+                    if let source = media.providerNames.first {
+                        DetailBadge(label: source, icon: "play.circle.fill")
+                    }
+                }
                 HStack(spacing: 10) {
                     Button {
                         store.toggleLibrary(media)
@@ -679,6 +711,20 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
+    }
+}
+
+struct DetailBadge: View {
+    let label: String
+    let icon: String
+    var body: some View {
+        Label(label, systemImage: icon)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.78))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.08))
+            .clipShape(Capsule())
     }
 }
 

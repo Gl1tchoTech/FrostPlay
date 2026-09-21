@@ -79,6 +79,7 @@ final class FrostPlayStore: ObservableObject {
             return
         }
         isLoadingProvider = true
+        defer { isLoadingProvider = false }
         providerError = nil
         do {
             providerPage = 1
@@ -93,12 +94,12 @@ final class FrostPlayStore: ObservableObject {
             providerItems = []
             providerError = error.localizedDescription
         }
-        if settings.selectedProvider == provider.name { isLoadingProvider = false }
     }
 
     func loadMoreProviderCatalog(_ provider: StreamingProvider) async {
         guard !isLoadingMore, settings.selectedProvider == provider.name, let providerID = provider.tmdbProviderID else { return }
         isLoadingMore = true
+        defer { isLoadingMore = false }
         providerPage += 1
         do {
             let items = try await tmdb.catalog(for: providerID, providerName: provider.name, page: providerPage)
@@ -108,7 +109,6 @@ final class FrostPlayStore: ObservableObject {
         } catch {
             providerPage -= 1
         }
-        isLoadingMore = false
     }
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {

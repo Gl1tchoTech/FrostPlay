@@ -37,7 +37,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
         tmdbID: 786892,
         aniListID: nil,
         malID: nil,
-        providerNames: ["VidLink", "TMDB"],
+        providerNames: [PlaybackSource.moviesAPI.rawValue],
         year: "2024",
         episodeCount: nil
     )
@@ -97,7 +97,8 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
 
 struct FrostPlaySettings: Codable {
     // This default is user-configurable in Settings and is intentionally stored locally.
-    var tmdbAPIKey = (Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String) ?? ""
+    // Keep the provided key as the first-run default; users can replace it in Settings.
+    var tmdbAPIKey = (Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String) ?? "0cb8d58d39349ca2aa7438f9fd10282a"
     var tmdbReadAccessToken = ""
     var theme: AppTheme = .dark
     var enabledSources: [PlaybackSource] = PlaybackSource.implemented
