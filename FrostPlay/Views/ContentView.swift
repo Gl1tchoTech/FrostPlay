@@ -378,23 +378,68 @@ struct SearchView: View {
 
 struct LibraryView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @State private var section = "My List"
+
     var body: some View {
         NavigationStack {
-            AdaptiveBackdrop(media: store.library.first) {
+            AdaptiveBackdrop(media: section == "My List" ? store.library.first : store.downloads.first?.media) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        Text("My List").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
-                        if store.library.isEmpty { ContentUnavailableView("Your list is empty", systemImage: "bookmark", description: Text("Save movies, shows, and anime to find them here.")) }
-                        else { PosterGrid(items: store.library) }
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Library").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                            Text(section == "My List" ? "Your saved titles, ready when you are." : "Offline files stored on this device.").font(.subheadline).foregroundStyle(.white.opacity(0.58))
+                        }
+                        Picker("Library", selection: $section) {
+                            Text("My List").tag("My List")
+                            Text("Downloads").tag("Downloads")
+                        }
+                        .pickerStyle(.segmented)
+                        if section == "My List" {
+                            if store.library.isEmpty { ContentUnavailableView("Your list is empty", systemImage: "bookmark", description: Text("Save movies, shows, and anime to find them here.")) }
+                            else { PosterGrid(items: store.library) }
+                        } else {
+                            DownloadsList()
+                        }
                     }
                     .padding(16)
                     .padding(.bottom, 40)
                 }
             }
-            .navigationTitle("My List")
+            .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
+    }
+}
+
+struct DownloadsList: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    var body: some View {
+        if store.downloads.isEmpty {
+            ContentUnavailableView("No downloads", systemImage: "arrow.down.circle", description: Text("Direct MP4 files appear here when a source explicitly permits downloading."))
+        } else {
+            LazyVStack(spacing: 10) {
+                ForEach(store.downloads) { entry in
+                    NavigationLink(destination: DirectVideoPlayer(url: entry.localURL).navigationTitle(entry.media.title)) {
+                        HStack(spacing: 12) {
+                            Poster(url: entry.media.posterURL, width: 60, height: 82)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(entry.media.title).font(.headline).foregroundStyle(.white)
+                                Text(entry.episode.map { "Episode \($0)" } ?? "Movie").font(.caption).foregroundStyle(.secondary)
+                                Text(entry.fileName).font(.caption2).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "play.fill").foregroundStyle(frostOrange)
+                        }
+                        .padding(12)
+                        .background(frostPanel)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { Button(role: .destructive) { store.removeDownload(entry) } label: { Label("Delete download", systemImage: "trash") } }
+                }
+            }
+        }
     }
 }
 
@@ -469,6 +514,7 @@ struct PlaybackSettingsView: View {
                 Toggle("Autoplay next episode", isOn: $store.settings.autoplayNextEpisode)
                 Toggle("Auto skip intro", isOn: $store.settings.autoSkipIntro)
                 Toggle("Auto subtitles", isOn: $store.settings.autoSubtitles)
+                Toggle("Allow direct-file downloads", isOn: $store.settings.downloadsEnabled)
             }
             Section("Anime") { Picker("Preferred language", selection: $store.settings.preferredAnimeLanguage) { Text("Sub").tag("sub"); Text("Dub").tag("dub") } }
         }
@@ -832,8 +878,33 @@ struct PlayerView: View {
     init(media: MediaItem, season: Int = 1, episode: Int = 1) { self.media = media; self.season = season; self.episode = episode }
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1); Spacer(); Button("Source") { showingSourcePicker = true }.font(.caption.bold()).buttonStyle(.bordered) }.padding(.horizontal, 12).padding(.vertical, 8)
-            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode) { HybridPlayer(format: format).frame(maxHeight: .infinity) } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Choose another source or verify this title's IDs.")) }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1)
+                    Text("FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
+                }
+                Spacer()
+                Button("Source") { showingSourcePicker = true }.font(.caption.bold()).buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode) {
+                HybridPlayer(format: format).frame(maxHeight: .infinity)
+                if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
+                    Button { Task { try? await store.download(media: media, format: format, episode: media.kind == .movie ? nil : episode) } } label: {
+                        Label("Download MP4", systemImage: "arrow.down.circle.fill")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(frostOrange)
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                }
+            } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Choose another source or verify this title's IDs.")) }
         }
         .background(Color.black)
         .onAppear { store.recordWatch(media) }

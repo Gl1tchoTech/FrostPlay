@@ -50,6 +50,15 @@ struct WatchEntry: Identifiable, Codable, Hashable {
     var lastPlayed: Date
 }
 
+struct DownloadEntry: Identifiable, Codable, Hashable {
+    let id: String
+    let media: MediaItem
+    let fileName: String
+    let localURL: URL
+    let downloadedAt: Date
+    let episode: Int?
+}
+
 struct EpisodeInfo: Identifiable, Hashable, Codable {
     let number: Int
     let name: String
@@ -122,9 +131,10 @@ struct FrostPlaySettings: Codable {
     var subtitleUseNativePlayer = false
     var subtitleColor = "white"
     var homeSections: [HomeSection] = HomeSection.defaultOrder
+    var downloadsEnabled = true
 
     enum CodingKeys: String, CodingKey {
-        case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections
+        case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
     }
 
     init() {}
@@ -154,6 +164,7 @@ struct FrostPlaySettings: Codable {
         subtitleUseNativePlayer = try container.decodeIfPresent(Bool.self, forKey: .subtitleUseNativePlayer) ?? defaults.subtitleUseNativePlayer
         subtitleColor = try container.decodeIfPresent(String.self, forKey: .subtitleColor) ?? defaults.subtitleColor
         homeSections = try container.decodeIfPresent([HomeSection].self, forKey: .homeSections) ?? defaults.homeSections
+        downloadsEnabled = try container.decodeIfPresent(Bool.self, forKey: .downloadsEnabled) ?? defaults.downloadsEnabled
     }
 }
 

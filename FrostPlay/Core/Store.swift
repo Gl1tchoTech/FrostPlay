@@ -6,6 +6,7 @@ final class FrostPlayStore: ObservableObject {
     @Published var settings: FrostPlaySettings { didSet { save(settings, key: "settings") } }
     @Published private(set) var library: [MediaItem] { didSet { save(library, key: "library") } }
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
+    @Published private(set) var downloads: [DownloadEntry] { didSet { save(downloads, key: "downloads") } }
     @Published var searchResults: [MediaItem] = []
     @Published var homeItems: [MediaItem] = [.preview]
     @Published var providerItems: [MediaItem] = []
@@ -45,6 +46,7 @@ final class FrostPlayStore: ObservableObject {
         settings = restoredSettings
         library = Self.load([MediaItem].self, key: "library") ?? []
         history = Self.load([WatchEntry].self, key: "history") ?? []
+        downloads = Self.load([DownloadEntry].self, key: "downloads") ?? []
     }
 
     func loadHome() async {
@@ -190,6 +192,26 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func isInLibrary(_ media: MediaItem) -> Bool { library.contains(media) }
+
+    func download(media: MediaItem, format: PlaybackFormat, episode: Int? = nil) async throws {
+        guard settings.downloadsEnabled, let sourceURL = AuthorizedDownloadManager.downloadableURL(for: format) else { return }
+        let (temporaryURL, response) = try await URLSession.shared.download(from: sourceURL)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return }
+        let fileName = AuthorizedDownloadManager.fileName(for: media, episode: episode)
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        let entry = DownloadEntry(id: "\(media.id)-\(episode.map(String.init) ?? "movie")", media: media, fileName: fileName, localURL: destination, downloadedAt: Date(), episode: episode)
+        downloads.removeAll { $0.id == entry.id }
+        downloads.insert(entry, at: 0)
+    }
+
+    func removeDownload(_ entry: DownloadEntry) {
+        try? FileManager.default.removeItem(at: entry.localURL)
+        downloads.removeAll { $0.id == entry.id }
+    }
 
     func recordWatch(_ media: MediaItem, progress: Double = 0) {
         let entry = WatchEntry(id: media.id, media: media, progress: progress, lastPlayed: Date())
