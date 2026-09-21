@@ -7,7 +7,7 @@ struct PlaybackResolver {
 
     func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1) -> PlaybackFormat? {
         // Keep provider contracts strict: AniList IDs never enter TMDB sources and vice versa.
-        let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.moviesAPI]
+        let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.vidLink, .moviesAPI]
         let orderedSources = settings.enabledSources.filter { allowed.contains($0) }
         for source in orderedSources {
             guard source.supports.contains(media.kind) else { continue }

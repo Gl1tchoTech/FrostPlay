@@ -740,7 +740,7 @@ struct EpisodePanel: View {
     private var episodes: [EpisodeInfo] {
         if let episodes = currentSeason?.episodes, !episodes.isEmpty { return episodes }
         let count = currentSeason?.episodeCount ?? media.episodeCount ?? 0
-        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode description unavailable.", airDate: nil) }
+        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode description unavailable.", airDate: nil, imageURL: nil) }
     }
 
     var body: some View {
@@ -764,10 +764,14 @@ struct EpisodePanel: View {
                 ForEach(episodes) { episode in
                     NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number)) {
                         HStack(alignment: .top, spacing: 11) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 9, style: .continuous).fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.12))
-                                Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? .black : .white)
-                            }.frame(width: 48, height: 40)
+                            if let imageURL = episode.imageURL {
+                                Poster(url: imageURL, width: 92, height: 58)
+                            } else {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.12))
+                                    Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? .black : .white)
+                                }.frame(width: 48, height: 40)
+                            }
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(episode.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
                                 if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }

@@ -55,6 +55,7 @@ struct EpisodeInfo: Identifiable, Hashable, Codable {
     let name: String
     let overview: String
     let airDate: String?
+    let imageURL: URL?
     var id: Int { number }
 }
 
@@ -76,11 +77,12 @@ enum PlaybackSource: String, Codable, CaseIterable, Identifiable, Hashable {
     var id: String { rawValue }
 
     // Only sources with verified identifier contracts are exposed in the app.
-    static var implemented: [PlaybackSource] { [.megaPlay, .moviesAPI] }
+    static var implemented: [PlaybackSource] { [.megaPlay, .vidLink, .moviesAPI] }
 
     var supports: Set<MediaKind> {
         switch self {
         case .megaPlay: return [.anime]
+        case .vidLink: return [.movie, .tv]
         case .moviesAPI: return [.movie, .tv]
         default: return []
         }

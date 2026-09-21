@@ -35,7 +35,10 @@ final class FrostPlayStore: ObservableObject {
     init() {
         var restoredSettings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
         let enabledSources = Set(restoredSettings.enabledSources)
+        // Keep the user's saved order, while migrating older installs that predate VidLink's active adapter.
         restoredSettings.enabledSources = PlaybackSource.implemented.filter { enabledSources.contains($0) }
+        let missingSources = PlaybackSource.implemented.filter { !restoredSettings.enabledSources.contains($0) }
+        restoredSettings.enabledSources.append(contentsOf: missingSources)
         if restoredSettings.enabledSources.isEmpty { restoredSettings.enabledSources = PlaybackSource.implemented }
         restoredSettings.homeSections = restoredSettings.homeSections.filter { HomeSection.allCases.contains($0) }
         if restoredSettings.homeSections.isEmpty { restoredSettings.homeSections = HomeSection.defaultOrder }
@@ -114,7 +117,7 @@ final class FrostPlayStore: ObservableObject {
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
         if media.kind == .anime {
             guard let count = media.episodeCount, count > 0 else { return [] }
-            let episodes = (1...count).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode details are provided by MegaPlay when playback starts.", airDate: nil) }
+            let episodes = (1...count).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode details are provided by MegaPlay when playback starts.", airDate: nil, imageURL: nil) }
             return [SeasonEpisodeInfo(season: 1, episodeCount: count, episodes: episodes)]
         }
         guard media.kind == .tv, let tmdbID = media.tmdbID else { return [] }

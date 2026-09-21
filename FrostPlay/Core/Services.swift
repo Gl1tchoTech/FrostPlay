@@ -98,7 +98,7 @@ struct TMDBService: MetadataService {
             let episodeData = try? await request(path: "tv/\(tvID)/season/\(season.seasonNumber)", query: [])
             let episodePayload = episodeData.flatMap { try? decode(TMDBSeasonDetailResponse.self, from: $0) }
             let episodes = episodePayload?.episodes.map { episode in
-                EpisodeInfo(number: episode.episodeNumber, name: episode.name, overview: episode.overview ?? "", airDate: episode.airDate)
+                EpisodeInfo(number: episode.episodeNumber, name: episode.name, overview: episode.overview ?? "", airDate: episode.airDate, imageURL: episode.stillPath.flatMap { URL(string: "https://image.tmdb.org/t/p/w300\($0)") })
             } ?? []
             seasons.append(SeasonEpisodeInfo(season: season.seasonNumber, episodeCount: season.episodeCount, episodes: episodes))
         }
@@ -215,11 +215,9 @@ struct VidLinkAdapter: PlaybackSourceAdapter {
     let source = PlaybackSource.vidLink
 
     func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat? {
+        // VidLink is deliberately TMDB-only. AniList IDs must never be sent here.
         let path: String
-        if media.kind == .anime {
-            guard let malID = media.malID, let episode else { return nil }
-            path = "anime/\(malID)/\(episode)/\(language)?fallback=true"
-        } else if media.kind == .movie {
+        if media.kind == .movie {
             guard let tmdbID = media.tmdbID else { return nil }
             path = "movie/\(tmdbID)"
         } else {
@@ -293,11 +291,13 @@ private struct TMDBEpisode: Decodable {
     let name: String
     let overview: String?
     let airDate: String?
+    let stillPath: String?
 
     enum CodingKeys: String, CodingKey {
         case episodeNumber = "episode_number"
         case name, overview
         case airDate = "air_date"
+        case stillPath = "still_path"
     }
 }
 
