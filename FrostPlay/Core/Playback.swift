@@ -43,7 +43,7 @@ final class PlayerController: ObservableObject {
     }
 
     func prepare() {
-        player.playImmediatelyIfPossible()
+        player.play()
     }
 }
 
