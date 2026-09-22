@@ -8,6 +8,8 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published private(set) var downloads: [DownloadEntry] { didSet { save(downloads, key: "downloads") } }
     @Published var searchResults: [MediaItem] = []
+    @Published private(set) var animeResults: [MediaItem] = []
+    @Published private(set) var animeError: String?
     @Published var homeItems: [MediaItem] = [.preview]
     @Published var providerItems: [MediaItem] = []
     @Published var isSearching = false
@@ -136,6 +138,7 @@ final class FrostPlayStore: ObservableObject {
 
         isSearching = true
         searchError = nil
+        if kind == .anime { animeError = nil }
         searchPage = 1
         activeSearchQuery = cleanQuery
         activeSearchKind = kind
@@ -157,6 +160,13 @@ final class FrostPlayStore: ObservableObject {
         }
 
         searchResults = results
+        if kind == .anime {
+            animeResults = results
+            animeError = results.isEmpty ? (failures.first ?? "AniList returned no titles.") : nil
+        } else if kind == nil {
+            animeResults = results.filter { $0.kind == .anime }
+            animeError = nil
+        }
         if results.isEmpty {
             searchError = failures.first ?? "No matching titles were found."
         }
@@ -179,6 +189,11 @@ final class FrostPlayStore: ObservableObject {
                 more += (try? await anilist.search(query: activeSearchQuery, kind: .anime, page: searchPage)) ?? []
             }
             searchResults.append(contentsOf: more)
+            if activeSearchKind == .anime {
+                animeResults.append(contentsOf: more)
+            } else if activeSearchKind == nil {
+                animeResults.append(contentsOf: more.filter { $0.kind == .anime })
+            }
             hasMoreResults = more.count >= 20
         } catch {
             searchPage -= 1

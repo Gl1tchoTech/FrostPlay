@@ -213,7 +213,7 @@ struct AniListService: MetadataService {
                     id: "anilist-\(anime.id)",
                     title: anime.title.english ?? anime.title.romaji ?? anime.title.native ?? "Untitled",
                     overview: anime.description?.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression) ?? "",
-                    posterURL: anime.coverImage.large.flatMap(URL.init),
+                    posterURL: anime.coverImage?.large.flatMap(URL.init),
                     backdropURL: anime.bannerImage.flatMap(URL.init),
                     kind: .anime,
                     tmdbID: nil,
@@ -349,7 +349,13 @@ private struct TMDBResult: Decodable {
 private struct AniListResponse: Decodable {
     let data: AniListData
 
-    struct AniListData: Decodable { let page: Page }
+    struct AniListData: Decodable {
+        let page: Page
+
+        enum CodingKeys: String, CodingKey {
+            case page = "Page"
+        }
+    }
     struct Page: Decodable { let media: [Anime] }
     struct Anime: Decodable {
         let id: Int
@@ -358,7 +364,7 @@ private struct AniListResponse: Decodable {
         let description: String?
         let seasonYear: Int?
         let episodes: Int?
-        let coverImage: Cover
+        let coverImage: Cover?
         let bannerImage: String?
     }
     struct Title: Decodable { let romaji: String?; let english: String?; let native: String? }

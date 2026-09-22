@@ -280,7 +280,7 @@ struct DiscoverView: View {
     @State private var selectedTab = "Movies"
 
     private var items: [MediaItem] {
-        let anime = store.searchResults.filter { $0.kind == .anime }
+        let anime = store.animeResults
         let movies = store.homeItems.filter { $0.kind == .movie }
         let shows = store.homeItems.filter { $0.kind == .tv }
         let categoryItems: [MediaItem]
@@ -323,20 +323,23 @@ struct DiscoverView: View {
                         }
                         if filter == .anime || selectedTab == "Anime" {
                             AnimeIntroCard()
+                            if let error = store.animeError {
+                                NoticeCard(title: "Anime catalog unavailable", message: error, systemImage: "wifi.exclamationmark")
+                            }
                         }
                         Text("\(items.count) results").font(.headline).foregroundStyle(.white.opacity(0.7))
                         PosterGrid(items: items)
                     }
                     .padding(16)
-                    .padding(.bottom, 40)
+                    .padding(.bottom, 140)
                 }
             }
             .navigationTitle("Discover")
             .navigationBarTitleDisplayMode(.inline)
-            .task { if store.searchResults.filter({ $0.kind == .anime }).isEmpty { await store.search(query: "", kind: .anime) } }
-            .onChange(of: selectedTab) { _, tab in
-                if (tab == "Anime" || tab == "All") && store.searchResults.filter({ $0.kind == .anime }).isEmpty {
-                    Task { await store.search(query: "", kind: .anime) }
+            .task(id: selectedTab) {
+                guard selectedTab == "Anime" || selectedTab == "All" else { return }
+                if store.animeResults.isEmpty {
+                    await store.search(query: "", kind: .anime)
                 }
             }
         }
@@ -779,11 +782,11 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 17) {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
                 Text(displayTitle(media.title, maxCharacters: 32))
-                    .font(.largeTitle.bold())
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
                     .minimumScaleFactor(0.72)
                     .foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
@@ -796,43 +799,49 @@ struct DetailView: View {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
                 }
-                HStack(spacing: 10) {
-                    Button {
-                        store.toggleLibrary(media)
-                    } label: {
-                        Label(store.isInLibrary(media) ? "Saved" : "Add to My List", systemImage: store.isInLibrary(media) ? "checkmark" : "bookmark")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 10)
-                            .background(frostOrange)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    if media.kind == .movie {
-                        NavigationLink {
-                            PlayerView(media: media)
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 8) {
+                        Button {
+                            store.toggleLibrary(media)
                         } label: {
-                            Label("Play", systemImage: "play.fill")
+                            Label(store.isInLibrary(media) ? "Saved" : "Add to My List", systemImage: store.isInLibrary(media) ? "checkmark" : "bookmark")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 13)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 11)
                                 .padding(.vertical, 10)
-                                .background(frostPanel)
+                                .background(frostOrange)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
                         }
                         .buttonStyle(.plain)
-                    }
 
+                        if media.kind == .movie {
+                            NavigationLink {
+                                PlayerView(media: media)
+                            } label: {
+                                Label("Play", systemImage: "play.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 13)
+                                    .padding(.vertical, 10)
+                                    .background(frostPanel)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                     Button {
                         showingSourcePicker = true
                     } label: {
-                        Label("Sources", systemImage: "rectangle.2.swap")
+                        Label("Choose source", systemImage: "rectangle.2.swap")
                             .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
                             .foregroundStyle(.white)
-                            .frame(minWidth: 92, height: 40)
+                            .frame(maxWidth: .infinity, minHeight: 42)
                             .background(frostPanel)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
@@ -846,8 +855,10 @@ struct DetailView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
+            .padding(.bottom, 140)
+            .containerRelativeFrame(.horizontal, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(frostBackground.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             Color.clear.frame(height: 108)
