@@ -159,8 +159,28 @@ struct AniListService: MetadataService {
     let endpoint = URL(string: "https://graphql.anilist.co")!
 
     func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
-        let request = URLRequestBuilder.postJSON(url: endpoint, body: [
-            "query": """
+        let queryText: String
+        let variables: [String: Any]
+        if query.isEmpty {
+            queryText = """
+            query ($page: Int) {
+              Page(page: $page, perPage: 20) {
+                media(type: ANIME, sort: POPULARITY_DESC) {
+                  id
+                  idMal
+                  title { romaji english native }
+                  description
+                  seasonYear
+                  episodes
+                  coverImage { large }
+                  bannerImage
+                }
+              }
+            }
+            """
+            variables = ["page": page]
+        } else {
+            queryText = """
             query ($search: String, $page: Int) {
               Page(page: $page, perPage: 20) {
                 media(search: $search, type: ANIME, sort: POPULARITY_DESC) {
@@ -175,8 +195,12 @@ struct AniListService: MetadataService {
                 }
               }
             }
-            """,
-            "variables": ["search": query, "page": page]
+            """
+            variables = ["search": query, "page": page]
+        }
+        let request = URLRequestBuilder.postJSON(url: endpoint, body: [
+            "query": queryText,
+            "variables": variables
         ])
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {

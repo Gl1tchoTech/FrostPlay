@@ -56,6 +56,8 @@ struct ContentView: View {
         .toolbarBackground(Color.black.opacity(0.94), for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .toolbarColorScheme(.dark, for: .tabBar)
+        // Keep the compact iPhone layout readable while still honoring Dynamic Type.
+        .dynamicTypeSize(.xSmall ... .large)
     }
 }
 
@@ -157,7 +159,9 @@ struct HomeView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 160)
                 }
-                .safeAreaPadding(.bottom, 90)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: 108)
+                }
             }
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.inline)
@@ -215,7 +219,13 @@ struct ProviderLogo: View {
     var body: some View {
         Group {
             if let url = provider.logoURL {
-                AsyncImage(url: url) { image in image.resizable().scaledToFit().padding(5) } placeholder: { Text(String(provider.name.prefix(1))).font(.caption.bold()) }
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFit().padding(5)
+                    } else {
+                        Text(String(provider.name.prefix(1))).font(.caption.bold())
+                    }
+                }
             } else { Image(systemName: "square.grid.2x2.fill").font(.caption) }
         }
         .frame(width: size, height: size)
@@ -226,33 +236,39 @@ struct ProviderLogo: View {
 
 struct HeroCard: View {
     let media: MediaItem
-    private var phoneContentWidth: CGFloat { max(UIScreen.main.bounds.width - 32, 280) }
     var body: some View {
-        NavigationLink(destination: DetailView(media: media)) {
-            ZStack(alignment: .bottomLeading) {
-                Poster(url: media.backdropURL ?? media.posterURL, width: phoneContentWidth, height: 255)
-                LinearGradient(colors: [.clear, .black.opacity(0.95)], startPoint: .center, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(media.kind.title.uppercased()).font(.caption2.bold()).tracking(2).foregroundStyle(frostOrange)
-                    Text(displayTitle(media.title, maxCharacters: 34))
-                        .font(.system(size: 27, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                    Text(displaySynopsis(media.overview))
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                    Label("View details", systemImage: "arrow.right").font(.caption.bold()).foregroundStyle(.white)
+        GeometryReader { proxy in
+            let contentWidth = max(proxy.size.width, 0)
+            NavigationLink(destination: DetailView(media: media)) {
+                ZStack(alignment: .bottomLeading) {
+                    Poster(url: media.backdropURL ?? media.posterURL, width: contentWidth, height: 255)
+                    LinearGradient(colors: [.clear, .black.opacity(0.95)], startPoint: .center, endPoint: .bottom)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(media.kind.title.uppercased()).font(.caption2.bold()).tracking(2).foregroundStyle(frostOrange)
+                        Text(displayTitle(media.title, maxCharacters: 34))
+                            .font(.system(size: 27, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(displaySynopsis(media.overview))
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Label("View details", systemImage: "arrow.right").font(.caption.bold()).foregroundStyle(.white)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(17)
                 }
-                .frame(width: phoneContentWidth - 34, alignment: .leading)
-                .padding(17)
+                .frame(width: contentWidth, height: 255)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             }
-            .frame(width: phoneContentWidth, height: 255)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .frame(height: 255)
     }
 }
 
@@ -264,20 +280,21 @@ struct DiscoverView: View {
     @State private var selectedTab = "Movies"
 
     private var items: [MediaItem] {
+        let anime = store.searchResults.filter { $0.kind == .anime }
+        let movies = store.homeItems.filter { $0.kind == .movie }
+        let shows = store.homeItems.filter { $0.kind == .tv }
+        let categoryItems: [MediaItem]
+        switch selectedTab {
+        case "Anime": categoryItems = anime
+        case "Movies": categoryItems = movies
+        case "Shows": categoryItems = shows
+        default: categoryItems = movies + shows + anime
+        }
         switch filter {
-        case .anime:
-            return store.searchResults.filter { $0.kind == .anime }
-        case .movies:
-            return store.homeItems.filter { $0.kind == .movie }
-        case .shows:
-            return store.homeItems.filter { $0.kind == .tv }
-        default:
-            switch selectedTab {
-            case "Anime": return store.searchResults.filter { $0.kind == .anime }
-            case "Movies": return store.homeItems.filter { $0.kind == .movie }
-            case "Shows": return store.homeItems.filter { $0.kind == .tv }
-            default: return store.homeItems.filter { $0.kind != .anime } + store.searchResults.filter { $0.kind == .anime }
-            }
+        case .anime: return selectedTab == "Movies" || selectedTab == "Shows" ? [] : anime
+        case .movies: return selectedTab == "Anime" ? [] : movies
+        case .shows: return selectedTab == "Anime" ? [] : shows
+        default: return categoryItems
         }
     }
 
@@ -287,7 +304,7 @@ struct DiscoverView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("Discover").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                            Text("Discover").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white).frame(maxWidth: .infinity, alignment: .leading)
                             Text("Filter and find your next watch.").foregroundStyle(.white.opacity(0.6))
                         }
                         Picker("Category", selection: $selectedTab) {
@@ -316,7 +333,12 @@ struct DiscoverView: View {
             }
             .navigationTitle("Discover")
             .navigationBarTitleDisplayMode(.inline)
-            .task { if store.searchResults.isEmpty { await store.search(query: "popular anime", kind: .anime) } }
+            .task { if store.searchResults.filter({ $0.kind == .anime }).isEmpty { await store.search(query: "", kind: .anime) } }
+            .onChange(of: selectedTab) { _, tab in
+                if (tab == "Anime" || tab == "All") && store.searchResults.filter({ $0.kind == .anime }).isEmpty {
+                    Task { await store.search(query: "", kind: .anime) }
+                }
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -707,8 +729,7 @@ struct ContentRail: View {
                                         .font(.caption.weight(.semibold))
                                         .lineLimit(1)
                                         .truncationMode(.tail)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .frame(width: 106, alignment: .leading)
+                                        .frame(width: 106, height: 32, alignment: .leading)
                                         .foregroundStyle(.white)
                                         .clipped()
                                     if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) }
@@ -716,9 +737,7 @@ struct ContentRail: View {
                                 .frame(width: 106, alignment: .leading)
                                 .clipped()
                             }
-                            .frame(width: 106, alignment: .leading)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .clipped()
+                            .frame(width: 106, height: progress ? 192 : 182, alignment: .topLeading)
                             .buttonStyle(.plain)
                             .onAppear { if media.id == items.last?.id { onReachedEnd?() } }
                         }
@@ -733,7 +752,16 @@ struct Poster: View {
     let url: URL?
     let width: CGFloat?
     let height: CGFloat
-    var body: some View { AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Rectangle().fill(Color.white.opacity(0.08)).overlay { Image(systemName: "film").foregroundStyle(.secondary) } }.frame(width: width, height: height).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous)) }
+    var body: some View {
+        AsyncImage(url: url) { image in
+            image.resizable().scaledToFill()
+        } placeholder: {
+            Rectangle().fill(Color.white.opacity(0.08)).overlay { Image(systemName: "film").foregroundStyle(.secondary) }
+        }
+        .frame(width: width, height: height)
+        .frame(maxWidth: width == nil ? .infinity : nil)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
 }
 
 struct DetailView: View {
@@ -750,10 +778,13 @@ struct DetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 17) {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
-                Text(media.title)
+                Text(displayTitle(media.title, maxCharacters: 32))
                     .font(.largeTitle.bold())
                     .lineLimit(2)
                     .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .minimumScaleFactor(0.72)
                     .foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
@@ -775,7 +806,7 @@ struct DetailView: View {
                             .padding(.horizontal, 13)
                             .padding(.vertical, 10)
                             .background(frostOrange)
-                            .clipShape(Capsule())
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                     .buttonStyle(.plain)
 
@@ -789,8 +820,8 @@ struct DetailView: View {
                                 .padding(.horizontal, 13)
                                 .padding(.vertical, 10)
                                 .background(frostPanel)
-                                .clipShape(Capsule())
-                                .overlay(Capsule().stroke(.white.opacity(0.18)))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
                         }
                         .buttonStyle(.plain)
                     }
@@ -798,13 +829,13 @@ struct DetailView: View {
                     Button {
                         showingSourcePicker = true
                     } label: {
-                        Image(systemName: "rectangle.2.swap")
+                        Label("Sources", systemImage: "rectangle.2.swap")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
-                            .frame(width: 40, height: 40)
+                            .frame(minWidth: 92, height: 40)
                             .background(frostPanel)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(.white.opacity(0.18)))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Choose source")
@@ -813,9 +844,14 @@ struct DetailView: View {
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 Text(media.providerNames.isEmpty ? "Source availability is limited for this title." : "Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(media.providerNames.isEmpty ? .orange : frostOrange)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
         }
+        .frame(maxWidth: .infinity)
         .background(frostBackground.ignoresSafeArea())
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: 108)
+        }
         .navigationTitle(media.title)
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
@@ -869,6 +905,17 @@ struct EpisodePanel: View {
                 .onChange(of: selectedSeason) { _, _ in selectedEpisode = 1 }
             }
             if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. Try another title or source.").font(.caption).foregroundStyle(.orange) }
+            if let selected = episodes.first(where: { $0.number == selectedEpisode }) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Episode \(selected.number) · \(selected.name)").font(.subheadline.bold()).foregroundStyle(.white)
+                    Text(selected.overview.isEmpty ? "No description available." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    if let airDate = selected.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
+                }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.055))
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
             LazyVStack(spacing: 9) {
                 ForEach(episodes) { episode in
                     NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number)) {

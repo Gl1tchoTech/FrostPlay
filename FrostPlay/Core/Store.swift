@@ -128,7 +128,7 @@ final class FrostPlayStore: ObservableObject {
 
     func search(query: String, kind: MediaKind? = nil) async {
         let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanQuery.isEmpty else {
+        guard !cleanQuery.isEmpty || kind == .anime else {
             searchResults = []
             searchError = nil
             return
@@ -165,7 +165,7 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func loadMoreSearchResults() async {
-        guard !isLoadingMore, hasMoreResults, !activeSearchQuery.isEmpty else { return }
+        guard !isLoadingMore, hasMoreResults, (!activeSearchQuery.isEmpty || activeSearchKind == .anime) else { return }
         isLoadingMore = true
         searchPage += 1
         var more: [MediaItem] = []
