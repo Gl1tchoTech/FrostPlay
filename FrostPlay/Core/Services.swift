@@ -164,7 +164,35 @@ struct AniListService: MetadataService {
     let session: URLSession = .shared
     let endpoint = URL(string: "https://graphql.anilist.co")!
 
+    func metadata(for aniListID: Int) async throws -> MediaMetadata {
+        let queryText = """
+        query ($id: Int) {
+          Media(id: $id, type: ANIME) {
+            genres
+            averageScore
+            status
+            format
+          }
+        }
+        """
+        var request = URLRequestBuilder.postJSON(url: endpoint, body: [
+            "query": queryText,
+            "variables": ["id": aniListID]
+        ])
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        do {
+            return try JSONDecoder().decode(AniListMetadataResponse.self, from: data).data.media.metadata
+        } catch {
+            throw FrostPlayServiceError.decodingFailed
+        }
+    }
+
     func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
+        guard kind == .anime else { throw FrostPlayServiceError.unsupportedMediaKind }
         let queryText: String
         let variables: [String: Any]
         if query.isEmpty {
@@ -299,8 +327,10 @@ struct MegaPlayAdapter: PlaybackSourceAdapter {
     let source = PlaybackSource.megaPlay
 
     func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat? {
-        guard let aniListID = media.aniListID, let episode else { return nil }
-        return URL(string: "https://megaplay.buzz/stream/ani/\(aniListID)/\(episode)/\(language)").map(PlaybackFormat.embed)
+        // MegaPlay accepts the AniList identifier for anime episodes only.
+        guard media.kind == .anime, media.tmdbID == nil, let aniListID = media.aniListID, let episode else { return nil }
+        let languageCode = language.lowercased() == "dub" ? "dub" : "sub"
+        return URL(string: "https://megaplay.buzz/stream/ani/\(aniListID)/\(episode)/\(languageCode)").map(PlaybackFormat.embed)
     }
 }
 
@@ -359,6 +389,25 @@ private struct TMDBResult: Decodable {
         case backdropPath = "backdrop_path"
         case releaseDate = "release_date"
         case firstAirDate = "first_air_date"
+    }
+}
+
+private struct AniListMetadataResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let media: Media
+    }
+
+    struct Media: Decodable {
+        let genres: [String]?
+        let averageScore: Int?
+        let status: String?
+        let format: String?
+
+        var metadata: MediaMetadata {
+            MediaMetadata(genres: genres ?? [], score: averageScore, status: status, format: format)
+        }
     }
 }
 

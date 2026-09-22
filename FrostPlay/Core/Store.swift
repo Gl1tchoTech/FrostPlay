@@ -118,6 +118,11 @@ final class FrostPlayStore: ObservableObject {
         }
     }
 
+    func animeMetadata(for media: MediaItem) async -> MediaMetadata? {
+        guard media.kind == .anime, let aniListID = media.aniListID else { return media.metadata }
+        return (try? await anilist.metadata(for: aniListID)) ?? media.metadata
+    }
+
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
         if media.kind == .anime {
             guard let count = media.episodeCount, count > 0 else { return [] }

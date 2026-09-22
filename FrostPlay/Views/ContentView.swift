@@ -800,6 +800,7 @@ struct DetailView: View {
     @State private var selectedEpisode = 1
     @State private var isLoadingEpisodes = false
     @State private var showingSourcePicker = false
+    @State private var refreshedAnimeMetadata: MediaMetadata?
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
 
     var body: some View {
@@ -824,7 +825,7 @@ struct DetailView: View {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
                 }
-                if media.kind == .anime, let metadata = media.metadata {
+                if media.kind == .anime, let metadata = refreshedAnimeMetadata ?? media.metadata {
                     HStack(spacing: 8) {
                         if let format = metadata.format { DetailBadge(label: format.capitalized, icon: "tv") }
                         if let score = metadata.score { DetailBadge(label: "Score \(score)%", icon: "star.fill") }
@@ -903,6 +904,9 @@ struct DetailView: View {
         .navigationTitle(media.title)
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
+        .task(id: media.id) {
+            refreshedAnimeMetadata = await store.animeMetadata(for: media)
+        }
         .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
     }
 }
@@ -1044,6 +1048,7 @@ struct SourcePickerView: View {
 
 struct PlayerView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @Environment(\.dismiss) private var dismiss
     let media: MediaItem
     let season: Int
     let episode: Int
@@ -1053,6 +1058,15 @@ struct PlayerView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1)
                     Text("FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
@@ -1081,8 +1095,11 @@ struct PlayerView: View {
             } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Choose another source or verify this title's IDs.")) }
         }
         .background(Color.black)
+        .ignoresSafeArea()
         .onAppear { store.recordWatch(media) }
         .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .navigationBarBackButtonHidden(true)
     }
 }
