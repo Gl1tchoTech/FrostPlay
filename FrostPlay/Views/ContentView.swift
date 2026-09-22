@@ -1,8 +1,19 @@
 import SwiftUI
+import UIKit
 
 private let frostBackground = Color(red: 0.025, green: 0.025, blue: 0.03)
 private let frostPanel = Color.white.opacity(0.075)
 private let frostOrange = Color.orange
+
+private func displayTitle(_ title: String, maxCharacters: Int = 24) -> String {
+    guard title.count > maxCharacters else { return title }
+    return String(title.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+}
+
+private func displaySynopsis(_ synopsis: String, maxCharacters: Int = 96) -> String {
+    guard synopsis.count > maxCharacters else { return synopsis }
+    return String(synopsis.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+}
 
 struct StreamingProvider: Identifiable {
     let id: String
@@ -42,6 +53,9 @@ struct ContentView: View {
             SettingsView().tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }
         .tint(.white)
+        .toolbarBackground(Color.black.opacity(0.94), for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
+        .toolbarColorScheme(.dark, for: .tabBar)
     }
 }
 
@@ -141,8 +155,9 @@ struct HomeView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
-                    .padding(.bottom, 40)
+                    .padding(.bottom, 160)
                 }
+                .safeAreaPadding(.bottom, 90)
             }
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.inline)
@@ -211,19 +226,30 @@ struct ProviderLogo: View {
 
 struct HeroCard: View {
     let media: MediaItem
+    private var phoneContentWidth: CGFloat { max(UIScreen.main.bounds.width - 32, 280) }
     var body: some View {
         NavigationLink(destination: DetailView(media: media)) {
             ZStack(alignment: .bottomLeading) {
-                Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 255).frame(maxWidth: .infinity)
+                Poster(url: media.backdropURL ?? media.posterURL, width: phoneContentWidth, height: 255)
                 LinearGradient(colors: [.clear, .black.opacity(0.95)], startPoint: .center, endPoint: .bottom)
                 VStack(alignment: .leading, spacing: 7) {
                     Text(media.kind.title.uppercased()).font(.caption2.bold()).tracking(2).foregroundStyle(frostOrange)
-                    Text(media.title).font(.system(size: 27, weight: .bold, design: .rounded)).foregroundStyle(.white).lineLimit(2)
-                    Text(media.overview).font(.caption).foregroundStyle(.white.opacity(0.72)).lineLimit(2)
+                    Text(displayTitle(media.title, maxCharacters: 34))
+                        .font(.system(size: 27, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                    Text(displaySynopsis(media.overview))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                     Label("View details", systemImage: "arrow.right").font(.caption.bold()).foregroundStyle(.white)
                 }
+                .frame(width: phoneContentWidth - 34, alignment: .leading)
                 .padding(17)
             }
+            .frame(width: phoneContentWidth, height: 255)
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -239,10 +265,19 @@ struct DiscoverView: View {
 
     private var items: [MediaItem] {
         switch filter {
-        case .anime: return store.searchResults.filter { $0.kind == .anime }
-        case .movies: return store.homeItems.filter { $0.kind == .movie }
-        case .shows: return store.homeItems.filter { $0.kind == .tv }
-        default: return store.homeItems
+        case .anime:
+            return store.searchResults.filter { $0.kind == .anime }
+        case .movies:
+            return store.homeItems.filter { $0.kind == .movie }
+        case .shows:
+            return store.homeItems.filter { $0.kind == .tv }
+        default:
+            switch selectedTab {
+            case "Anime": return store.searchResults.filter { $0.kind == .anime }
+            case "Movies": return store.homeItems.filter { $0.kind == .movie }
+            case "Shows": return store.homeItems.filter { $0.kind == .tv }
+            default: return store.homeItems.filter { $0.kind != .anime } + store.searchResults.filter { $0.kind == .anime }
+            }
         }
     }
 
@@ -256,6 +291,7 @@ struct DiscoverView: View {
                             Text("Filter and find your next watch.").foregroundStyle(.white.opacity(0.6))
                         }
                         Picker("Category", selection: $selectedTab) {
+                            Text("All").tag("All")
                             Text("Movies").tag("Movies")
                             Text("Shows").tag("Shows")
                             Text("Anime").tag("Anime")
@@ -333,7 +369,14 @@ struct PosterGrid: View {
                             Poster(url: media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
                             if media.providerNames.isEmpty { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).padding(8).background(.black.opacity(0.7)).clipShape(Circle()).padding(7) }
                         }
-                        Text(media.title).font(.subheadline.weight(.semibold)).lineLimit(2).foregroundStyle(.white)
+                        Text(displayTitle(media.title))
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .clipped()
+                            .foregroundStyle(.white)
                         Text(media.kind.title + (media.year.map { " · \($0)" } ?? "") + " · Source info available")
                             .font(.caption2).foregroundStyle(.white.opacity(0.55)).lineLimit(2)
                     }
@@ -424,7 +467,11 @@ struct DownloadsList: View {
                         HStack(spacing: 12) {
                             Poster(url: entry.media.posterURL, width: 60, height: 82)
                             VStack(alignment: .leading, spacing: 5) {
-                                Text(entry.media.title).font(.headline).foregroundStyle(.white)
+                                Text(entry.media.title)
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .foregroundStyle(.white)
                                 Text(entry.episode.map { "Episode \($0)" } ?? "Movie").font(.caption).foregroundStyle(.secondary)
                                 Text(entry.fileName).font(.caption2).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
                             }
@@ -617,7 +664,7 @@ struct MediaRow: View {
         NavigationLink(destination: DetailView(media: media)) {
             HStack(spacing: 12) {
                 Poster(url: media.posterURL, width: 58, height: 82)
-                VStack(alignment: .leading, spacing: 5) { Text(media.title).font(.headline).foregroundStyle(.white); Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary); if progress > 0 { ProgressView(value: progress).tint(frostOrange) } }
+                VStack(alignment: .leading, spacing: 5) {                        Text(media.title).font(.headline).lineLimit(1).truncationMode(.tail).foregroundStyle(.white); Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary); if progress > 0 { ProgressView(value: progress).tint(frostOrange) } }
                 Spacer()
                 if media.providerNames.isEmpty { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
             }
@@ -656,10 +703,22 @@ struct ContentRail: View {
                             NavigationLink(destination: DetailView(media: media)) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Poster(url: media.posterURL, width: 106, height: 150)
-                                    Text(media.title).font(.caption.weight(.semibold)).lineLimit(2).foregroundStyle(.white)
+                                    Text(displayTitle(media.title, maxCharacters: 20))
+                                        .font(.caption.weight(.semibold))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(width: 106, alignment: .leading)
+                                        .foregroundStyle(.white)
+                                        .clipped()
                                     if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) }
                                 }
+                                .frame(width: 106, alignment: .leading)
+                                .clipped()
                             }
+                            .frame(width: 106, alignment: .leading)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .clipped()
                             .buttonStyle(.plain)
                             .onAppear { if media.id == items.last?.id { onReachedEnd?() } }
                         }
@@ -691,7 +750,11 @@ struct DetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 17) {
                 Poster(url: media.backdropURL ?? media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
-                Text(media.title).font(.largeTitle.bold()).foregroundStyle(.white)
+                Text(media.title)
+                    .font(.largeTitle.bold())
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     DetailBadge(label: media.kind == .anime ? "AniList" : "TMDB", icon: "checkmark.seal.fill")
@@ -819,7 +882,11 @@ struct EpisodePanel: View {
                                 }.frame(width: 48, height: 40)
                             }
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(episode.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                Text(episode.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .foregroundStyle(.white)
                                 if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
                                 Text(episode.overview.isEmpty ? "No description available." : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
                             }
@@ -855,9 +922,21 @@ struct SourcePickerView: View {
         NavigationStack {
             List {
                 Section("Available sources") {
-                    ForEach(PlaybackSource.implemented) { source in
-                        let available = source.supports.contains(media.kind)
-                        Button { if available { dismiss() } } label: { HStack { Image(systemName: available ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(available ? .green : .orange); VStack(alignment: .leading) { Text(source.rawValue).foregroundStyle(.primary); Text(available ? "Compatible with this title type" : "Not compatible with this title").font(.caption).foregroundStyle(.secondary) }; Spacer(); if available { Text("Use").foregroundStyle(frostOrange) } } }
+                    ForEach(PlaybackSource.implemented.filter { $0.supports.contains(media.kind) }) { source in
+                        Button { dismiss() } label: {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                                VStack(alignment: .leading) {
+                                    Text(source.rawValue).foregroundStyle(.primary)
+                                    Text("Compatible with this title type").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("Use").foregroundStyle(frostOrange)
+                            }
+                        }
+                    }
+                    if PlaybackSource.implemented.filter({ $0.supports.contains(media.kind) }).isEmpty {
+                        Text("No verified source is available for this title.").foregroundStyle(.secondary)
                     }
                 }
             }
