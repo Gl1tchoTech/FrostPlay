@@ -191,6 +191,46 @@ struct AniListService: MetadataService {
         }
     }
 
+    func episodes(for aniListID: Int, count: Int?, fallbackOverview: String) async throws -> [EpisodeInfo] {
+        let queryText = """
+        query ($id: Int) {
+          Media(id: $id, type: ANIME) {
+            episodes
+            streamingEpisodes { title thumbnail url }
+          }
+        }
+        """
+        var request = URLRequestBuilder.postJSON(url: endpoint, body: [
+            "query": queryText,
+            "variables": ["id": aniListID]
+        ])
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        do {
+            let payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
+            let mapped = (payload.data.media.streamingEpisodes ?? []).enumerated().map { index, item in
+                let title = item.title ?? ""
+                let number = title.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first ?? index + 1
+                return EpisodeInfo(
+                    number: number,
+                    name: title.isEmpty ? "Episode \(number)" : title,
+                    overview: fallbackOverview.isEmpty ? "Episode details provided by AniList." : fallbackOverview,
+                    airDate: nil,
+                    imageURL: item.thumbnail.flatMap(URL.init),
+                    playbackURL: item.url.flatMap(URL.init).flatMap { $0.host?.contains("megaplay.buzz") == true ? $0 : nil }
+                )
+            }
+            if !mapped.isEmpty { return mapped }
+            guard let count, count > 0 else { return [] }
+            return (1...count).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode metadata is not available from AniList.", airDate: nil, imageURL: nil) }
+        } catch {
+            throw FrostPlayServiceError.decodingFailed
+        }
+    }
+
     func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
         guard kind == .anime else { throw FrostPlayServiceError.unsupportedMediaKind }
         let queryText: String
@@ -389,6 +429,25 @@ private struct TMDBResult: Decodable {
         case backdropPath = "backdrop_path"
         case releaseDate = "release_date"
         case firstAirDate = "first_air_date"
+    }
+}
+
+private struct AniListEpisodesResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let media: Media
+    }
+
+    struct Media: Decodable {
+        let episodes: Int?
+        let streamingEpisodes: [Episode]?
+    }
+
+    struct Episode: Decodable {
+        let title: String?
+        let thumbnail: String?
+        let url: String?
     }
 }
 

@@ -6,7 +6,12 @@ import WebKit
 struct PlaybackResolver {
     private let adapters: [PlaybackSourceAdapter] = [VidLinkAdapter(), MegaPlayAdapter(), MoviesAPIAdapter()]
 
-    func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1) -> PlaybackFormat? {
+    func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1, preferredURL: URL? = nil) -> PlaybackFormat? {
+        if media.kind == .anime,
+           let preferredURL,
+           preferredURL.host?.contains("megaplay.buzz") == true {
+            return .embed(preferredURL)
+        }
         let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.vidLink, .moviesAPI]
         let orderedSources = settings.enabledSources.filter { allowed.contains($0) }
         for source in orderedSources {

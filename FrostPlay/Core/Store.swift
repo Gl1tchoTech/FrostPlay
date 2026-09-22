@@ -125,9 +125,11 @@ final class FrostPlayStore: ObservableObject {
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
         if media.kind == .anime {
-            guard let count = media.episodeCount, count > 0 else { return [] }
-            let episodes = (1...count).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode details are provided by MegaPlay when playback starts.", airDate: nil, imageURL: nil) }
-            return [SeasonEpisodeInfo(season: 1, episodeCount: count, episodes: episodes)]
+            guard let aniListID = media.aniListID else { return [] }
+            let episodes = (try? await anilist.episodes(for: aniListID, count: media.episodeCount, fallbackOverview: media.overview)) ?? []
+            let count = media.episodeCount ?? episodes.count
+            guard count > 0 || !episodes.isEmpty else { return [] }
+            return [SeasonEpisodeInfo(season: 1, episodeCount: max(count, episodes.count), episodes: episodes)]
         }
         guard media.kind == .tv, let tmdbID = media.tmdbID else { return [] }
         return (try? await tmdb.seasons(for: tmdbID)) ?? []

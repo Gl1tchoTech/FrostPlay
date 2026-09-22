@@ -73,6 +73,7 @@ struct EpisodeInfo: Identifiable, Hashable, Codable {
     let overview: String
     let airDate: String?
     let imageURL: URL?
+    var playbackURL: URL? = nil
     var id: Int { number }
 }
 

@@ -970,9 +970,9 @@ struct EpisodePanel: View {
             }
             LazyVStack(spacing: 9) {
                 ForEach(episodes) { episode in
-                    NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number)) {
+                    NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number, preferredPlaybackURL: episode.playbackURL)) {
                         HStack(alignment: .top, spacing: 11) {
-                            if let imageURL = episode.imageURL {
+                            if let imageURL = episode.imageURL ?? (media.kind == .anime ? media.posterURL : nil) {
                                 Poster(url: imageURL, width: 92, height: 58)
                             } else {
                                 ZStack {
@@ -1052,9 +1052,15 @@ struct PlayerView: View {
     let media: MediaItem
     let season: Int
     let episode: Int
+    let preferredPlaybackURL: URL?
     @State private var showingSourcePicker = false
     private let resolver = PlaybackResolver()
-    init(media: MediaItem, season: Int = 1, episode: Int = 1) { self.media = media; self.season = season; self.episode = episode }
+    init(media: MediaItem, season: Int = 1, episode: Int = 1, preferredPlaybackURL: URL? = nil) {
+        self.media = media
+        self.season = season
+        self.episode = episode
+        self.preferredPlaybackURL = preferredPlaybackURL
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1076,7 +1082,7 @@ struct PlayerView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode) {
+            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredPlaybackURL) {
                 HybridPlayer(format: format).frame(maxHeight: .infinity)
                 if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
                     Button { Task { try? await store.download(media: media, format: format, episode: media.kind == .movie ? nil : episode) } } label: {
