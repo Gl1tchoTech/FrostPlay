@@ -33,7 +33,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let providerNames: [String]
     let year: String?
     let episodeCount: Int?
-    let metadata: MediaMetadata? = nil
+    var metadata: MediaMetadata? = nil
 
     static let preview = MediaItem(
         id: "preview-furiosa",
