@@ -4,6 +4,7 @@ enum FrostPlayServiceError: LocalizedError {
     case missingTMDBCredential
     case invalidResponse
     case decodingFailed
+    case unsupportedMediaKind
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum FrostPlayServiceError: LocalizedError {
             return "The service returned an invalid response."
         case .decodingFailed:
             return "The service returned data FrostPlay could not read."
+        case .unsupportedMediaKind:
+            return "This catalog only handles movies and TV shows."
         }
     }
 }
@@ -32,9 +35,11 @@ struct TMDBService: MetadataService {
     }
 
     func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
+        guard kind != .anime else { throw FrostPlayServiceError.unsupportedMediaKind }
         guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
         let endpoint: String
         if let kind {
+            guard kind == .movie || kind == .tv else { throw FrostPlayServiceError.unsupportedMediaKind }
             endpoint = kind == .tv ? "search/tv" : "search/movie"
         } else {
             return try await searchMulti(query: query, page: page)
@@ -114,6 +119,7 @@ struct TMDBService: MetadataService {
         components.queryItems = queryItems
 
         var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 20
         if !readAccessToken.isEmpty {
             request.setValue("Bearer \(readAccessToken)", forHTTPHeaderField: "Authorization")
         }
@@ -172,6 +178,10 @@ struct AniListService: MetadataService {
                   description
                   seasonYear
                   episodes
+                  genres
+                  averageScore
+                  status
+                  format
                   coverImage { large }
                   bannerImage
                 }
@@ -190,6 +200,10 @@ struct AniListService: MetadataService {
                   description
                   seasonYear
                   episodes
+                  genres
+                  averageScore
+                  status
+                  format
                   coverImage { large }
                   bannerImage
                 }
@@ -198,10 +212,11 @@ struct AniListService: MetadataService {
             """
             variables = ["search": query, "page": page]
         }
-        let request = URLRequestBuilder.postJSON(url: endpoint, body: [
+        var request = URLRequestBuilder.postJSON(url: endpoint, body: [
             "query": queryText,
             "variables": variables
         ])
+        request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw FrostPlayServiceError.invalidResponse
@@ -221,7 +236,8 @@ struct AniListService: MetadataService {
                     malID: anime.idMal,
                     providerNames: ["MegaPlay"],
                     year: anime.seasonYear.map(String.init),
-                    episodeCount: anime.episodes
+                    episodeCount: anime.episodes,
+                    metadata: MediaMetadata(genres: anime.genres ?? [], score: anime.averageScore, status: anime.status, format: anime.format)
                 )
             }
         } catch {
@@ -352,8 +368,15 @@ private struct AniListResponse: Decodable {
     struct AniListData: Decodable {
         let page: Page
 
-        enum CodingKeys: String, CodingKey {
-            case page = "Page"
+        private enum CodingKeys: String, CodingKey {
+            case upperPage = "Page"
+            case lowerPage = "page"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            page = try container.decodeIfPresent(Page.self, forKey: .upperPage)
+                ?? container.decode(Page.self, forKey: .lowerPage)
         }
     }
     struct Page: Decodable { let media: [Anime] }
@@ -364,6 +387,10 @@ private struct AniListResponse: Decodable {
         let description: String?
         let seasonYear: Int?
         let episodes: Int?
+        let genres: [String]?
+        let averageScore: Int?
+        let status: String?
+        let format: String?
         let coverImage: Cover?
         let bannerImage: String?
     }

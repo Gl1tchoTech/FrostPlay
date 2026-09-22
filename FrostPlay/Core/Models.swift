@@ -13,6 +13,13 @@ enum PlaybackFormat: Codable, Equatable {
     case mp4(URL)
 }
 
+struct MediaMetadata: Codable, Hashable {
+    let genres: [String]
+    let score: Int?
+    let status: String?
+    let format: String?
+}
+
 struct MediaItem: Identifiable, Codable, Hashable {
     let id: String
     let title: String
@@ -26,6 +33,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let providerNames: [String]
     let year: String?
     let episodeCount: Int?
+    let metadata: MediaMetadata? = nil
 
     static let preview = MediaItem(
         id: "preview-furiosa",

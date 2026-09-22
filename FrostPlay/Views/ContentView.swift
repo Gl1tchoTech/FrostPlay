@@ -327,7 +327,27 @@ struct DiscoverView: View {
                                 NoticeCard(title: "Anime catalog unavailable", message: error, systemImage: "wifi.exclamationmark")
                             }
                         }
+                        if store.isSearching && (selectedTab == "Anime" || selectedTab == "All") {
+                            ProgressView("Loading AniList…")
+                                .tint(frostOrange)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                        }
                         Text("\(items.count) results").font(.headline).foregroundStyle(.white.opacity(0.7))
+                        if items.isEmpty && (selectedTab == "Anime" || filter == .anime) && !store.isSearching && store.animeError == nil {
+                            Button {
+                                Task { await store.loadAnimeCatalog() }
+                            } label: {
+                                Label("Retry AniList", systemImage: "arrow.clockwise")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(frostOrange)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
                         PosterGrid(items: items)
                     }
                     .padding(16)
@@ -338,9 +358,14 @@ struct DiscoverView: View {
             .navigationBarTitleDisplayMode(.inline)
             .task(id: selectedTab) {
                 guard selectedTab == "Anime" || selectedTab == "All" else { return }
-                if store.animeResults.isEmpty {
-                    await store.search(query: "", kind: .anime)
-                }
+                await store.loadAnimeCatalog()
+            }
+            .onAppear {
+                Task { await store.loadAnimeCatalog() }
+            }
+            .onChange(of: selectedTab) { _, tab in
+                guard tab == "Anime" || tab == "All" else { return }
+                Task { await store.loadAnimeCatalog() }
             }
         }
         .preferredColorScheme(.dark)
@@ -799,6 +824,19 @@ struct DetailView: View {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
                 }
+                if media.kind == .anime, let metadata = media.metadata {
+                    HStack(spacing: 8) {
+                        if let format = metadata.format { DetailBadge(label: format.capitalized, icon: "tv") }
+                        if let score = metadata.score { DetailBadge(label: "Score \(score)%", icon: "star.fill") }
+                        if let status = metadata.status { DetailBadge(label: status.capitalized, icon: "info.circle") }
+                    }
+                    if !metadata.genres.isEmpty {
+                        Text(metadata.genres.joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.58))
+                            .lineLimit(2)
+                    }
+                }
                 VStack(alignment: .leading, spacing: 9) {
                     HStack(spacing: 8) {
                         Button {
@@ -853,15 +891,14 @@ struct DetailView: View {
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 Text(media.providerNames.isEmpty ? "Source availability is limited for this title." : "Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(media.providerNames.isEmpty ? .orange : frostOrange)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .padding(.bottom, 140)
-            .containerRelativeFrame(.horizontal, alignment: .leading)
+            .frame(width: UIScreen.main.bounds.width, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 180)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(frostBackground.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: 108)
+            Color.clear.frame(height: 150)
         }
         .navigationTitle(media.title)
         .navigationBarTitleDisplayMode(.inline)

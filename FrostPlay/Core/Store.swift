@@ -128,6 +128,11 @@ final class FrostPlayStore: ObservableObject {
         return (try? await tmdb.seasons(for: tmdbID)) ?? []
     }
 
+    func loadAnimeCatalog() async {
+        guard !isSearching else { return }
+        await search(query: "", kind: .anime)
+    }
+
     func search(query: String, kind: MediaKind? = nil) async {
         let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanQuery.isEmpty || kind == .anime else {
@@ -137,6 +142,7 @@ final class FrostPlayStore: ObservableObject {
         }
 
         isSearching = true
+        defer { isSearching = false }
         searchError = nil
         if kind == .anime { animeError = nil }
         searchPage = 1
@@ -161,17 +167,16 @@ final class FrostPlayStore: ObservableObject {
 
         searchResults = results
         if kind == .anime {
-            animeResults = results
-            animeError = results.isEmpty ? (failures.first ?? "AniList returned no titles.") : nil
+            animeResults = results.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil }
+            animeError = animeResults.isEmpty ? (failures.first ?? "AniList returned no titles.") : nil
         } else if kind == nil {
-            animeResults = results.filter { $0.kind == .anime }
+            animeResults = results.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil }
             animeError = nil
         }
         if results.isEmpty {
             searchError = failures.first ?? "No matching titles were found."
         }
         hasMoreResults = results.count >= 20
-        isSearching = false
     }
 
     func loadMoreSearchResults() async {
@@ -190,9 +195,9 @@ final class FrostPlayStore: ObservableObject {
             }
             searchResults.append(contentsOf: more)
             if activeSearchKind == .anime {
-                animeResults.append(contentsOf: more)
+                animeResults.append(contentsOf: more.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil })
             } else if activeSearchKind == nil {
-                animeResults.append(contentsOf: more.filter { $0.kind == .anime })
+                animeResults.append(contentsOf: more.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil })
             }
             hasMoreResults = more.count >= 20
         } catch {
