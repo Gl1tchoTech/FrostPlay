@@ -175,31 +175,29 @@ enum MegaPlayURL {
     }
 }
 
+private struct AnimeStreamEpisode {
+    let number: Int
+    let playbackURL: URL?
+}
+
 struct AnikotoService {
     private let session: URLSession = .shared
     private let baseURL = URL(string: "https://anikotoapi.site")!
 
-    // The API may return no episode description or still image; those are supplied
-    // from AniList when available. Only the API's own MegaPlay URL is used to play.
-
-    func episodes(for media: MediaItem, fallbackOverview: String, language: String = "sub") async throws -> [EpisodeInfo] {
+    // Anikoto resolves only the MegaPlay URL; AniList owns anime display metadata.
+    fileprivate func episodes(for media: MediaItem, language: String = "sub") async throws -> [AnimeStreamEpisode] {
         guard media.kind == .anime else { return [] }
         let series = try await resolveSeries(for: media)
         let preferredLanguage = language.lowercased() == "dub" ? "dub" : "sub"
         return series.episodes.compactMap { episode in
-            let number = episode.number ?? episode.title?.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first
-            guard let number else { return nil }
+            guard let number = episode.number else { return nil }
             // The API's embed_url is authoritative. Do not manufacture a MegaPlay URL
             // from AniList IDs: MegaPlay requires Anikoto's episode embed ID.
             let languageURL = preferredLanguage == "dub"
                 ? (episode.embedURL?.dub ?? episode.embedURL?.sub)
                 : (episode.embedURL?.sub ?? episode.embedURL?.dub)
-            return EpisodeInfo(
+            return AnimeStreamEpisode(
                 number: number,
-                name: episode.title?.isEmpty == false ? episode.title! : "Episode \(number)",
-                overview: episode.description?.isEmpty == false ? episode.description! : fallbackOverview,
-                airDate: nil,
-                imageURL: episode.thumbnail.flatMap(URL.init) ?? episode.image.flatMap(URL.init),
                 playbackURL: MegaPlayURL.validated(languageURL)
             )
         }
@@ -325,17 +323,11 @@ private struct AnikotoAnime: Decodable {
 }
 
 private struct AnikotoEpisode: Decodable {
-    let title: String?
     let number: Int?
-    let description: String?
-    let thumbnail: String?
-    let image: String?
-    let episodeEmbedID: String?
     let embedURL: AnikotoEmbedURL?
 
     enum CodingKeys: String, CodingKey {
-        case title, number, description, thumbnail, image
-        case episodeEmbedID = "episode_embed_id"
+        case number
         case embedURL = "embed_url"
     }
 }
@@ -387,15 +379,16 @@ struct AniListService: MetadataService {
         }
     }
 
-    func episodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {
-        guard let aniListID = media.aniListID else { return [] }
+    func episodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {            guard let aniListID = media.aniListID else { return [] }
 
-        // AniList's streamingEpisodes are presentation metadata only; their URLs
+            // AniList's streamingEpisodes are presentation metadata only; their URLs
+
         // are intentionally ignored because playback must always resolve via MegaPlay.
         let queryText = """
         query ($id: Int) {
           Media(id: $id, type: ANIME) {
             description
+            episodes
             streamingEpisodes { title thumbnail url }
           }
         }
@@ -414,46 +407,45 @@ struct AniListService: MetadataService {
             }
             aniListMedia = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data).data.media
         } catch {
-            // Still show the API's episode list if AniList is temporarily unavailable.
-            aniListMedia = nil
+            // AniList owns the metadata; without it, don't substitute stream-catalog details.
+            return []
         }
+        guard let aniListMedia else { return [] }
 
-        let seriesOverview = aniListMedia?.description?
-            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression) ?? media.overview
+        let seriesOverview = (aniListMedia.description ?? media.overview)
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         let anikotoEpisodes = (try? await AnikotoService().episodes(
             for: media,
-            fallbackOverview: seriesOverview,
             language: language
         )) ?? []
 
         // AniList can return several streaming links for the same episode. Keep one
         // metadata row per episode instead of trapping in Dictionary(uniqueKeysWithValues:).
         var anilistByNumber: [Int: AniListEpisodesResponse.Episode] = [:]
-        for (index, item) in (aniListMedia?.streamingEpisodes ?? []).enumerated() {
+        for (index, item) in (aniListMedia.streamingEpisodes ?? []).enumerated() {
             let number = item.title?.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first ?? index + 1
             if let existing = anilistByNumber[number], existing.thumbnail != nil || item.thumbnail == nil { continue }
             anilistByNumber[number] = item
         }
         let streamsByNumber = Dictionary(anikotoEpisodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
-        let allNumbers = Set(anilistByNumber.keys).union(streamsByNumber.keys).sorted()
+        var episodeNumbers = Set(anilistByNumber.keys).union(streamsByNumber.keys)
+        if let episodeCount = aniListMedia.episodes, episodeCount > 0 {
+            episodeNumbers.formUnion(1...min(episodeCount, 1_000))
+        }
 
-        // AniList supplies episode names/images and the series synopsis. Anikoto
-        // supplies only valid MegaPlay playback URLs and episode availability.
-        return allNumbers.map { number in
+        // AniList supplies every visible field and the canonical episode count;
+        // Anikoto contributes only stream URLs.
+        return episodeNumbers.sorted().map { number in
             let metadataEpisode = anilistByNumber[number]
             let streamEpisode = streamsByNumber[number]
-            let fallbackTitle = "Episode \(number)"
-            let streamTitle = streamEpisode?.name
-            let name = (streamTitle == nil || streamTitle == fallbackTitle)
-                ? (metadataEpisode?.title?.isEmpty == false ? metadataEpisode!.title! : fallbackTitle)
-                : streamTitle!
+            let title = metadataEpisode?.title?.isEmpty == false ? metadataEpisode!.title! : "Episode \(number)"
             return EpisodeInfo(
                 number: number,
-                name: name,
-                overview: streamEpisode?.overview.isEmpty == false ? streamEpisode!.overview : seriesOverview,
+                name: title,
+                overview: seriesOverview,
                 airDate: nil,
-                imageURL: metadataEpisode?.thumbnail.flatMap(URL.init) ?? streamEpisode?.imageURL ?? media.posterURL,
-                playbackURL: MegaPlayURL.validated(streamEpisode?.playbackURL)
+                imageURL: metadataEpisode?.thumbnail.flatMap(URL.init) ?? media.posterURL,
+                playbackURL: streamEpisode?.playbackURL
             )
         }
     }
@@ -668,6 +660,7 @@ private struct AniListEpisodesResponse: Decodable {
 
     struct Media: Decodable {
         let description: String?
+        let episodes: Int?
         let streamingEpisodes: [Episode]?
     }
 

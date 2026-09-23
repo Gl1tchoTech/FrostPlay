@@ -72,6 +72,7 @@ struct DirectVideoPlayer: View {
 
 struct EmbedPlayer: UIViewRepresentable {
     let url: URL
+
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -80,15 +81,31 @@ struct EmbedPlayer: UIViewRepresentable {
         webView.scrollView.isScrollEnabled = false
         webView.isOpaque = false
         webView.backgroundColor = .black
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        // MegaPlay rejects embeds without a same-site navigation context.
-        request.setValue("https://megaplay.buzz/", forHTTPHeaderField: "Referer")
-        request.setValue("https://megaplay.buzz", forHTTPHeaderField: "Origin")
-        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-        webView.load(request)
+        webView.scrollView.backgroundColor = .black
+        loadEmbed(in: webView)
         return webView
     }
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard webView.url == nil else { return }
+        loadEmbed(in: webView)
+    }
+
+    private func loadEmbed(in webView: WKWebView) {
+        guard let trustedURL = MegaPlayURL.validated(url) else {
+            webView.loadHTMLString("<html><body style='margin:0;background:#000;color:#fff;font:16px -apple-system;display:grid;place-items:center;height:100vh'>Invalid MegaPlay embed URL</body></html>", baseURL: nil)
+            return
+        }
+        let iframeURL = trustedURL.absoluteString
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let html = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{border:0;width:100%;height:100%;display:block}</style></head><body><iframe src="\(iframeURL)" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen referrerpolicy="origin"></iframe></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: URL(string: "https://megaplay.buzz/"))
+    }
 }
 
 struct AuthorizedDownloadManager {
