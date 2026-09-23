@@ -958,9 +958,19 @@ struct EpisodePanel: View {
             }
             if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. Try another title or source.").font(.caption).foregroundStyle(.orange) }
             if let selected = episodes.first(where: { $0.number == selectedEpisode }) {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 9) {
+                    if let imageURL = selected.imageURL ?? (media.kind == .anime ? media.posterURL : nil) {
+                        Poster(url: imageURL, width: nil, height: 170)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
                     Text("Episode \(selected.number) · \(selected.name)").font(.subheadline.bold()).foregroundStyle(.white)
-                    Text(selected.overview.isEmpty ? "No description available." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    Text(selected.overview.isEmpty ? "Episode details are not available from the catalog." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    if media.kind == .anime && selected.playbackURL == nil {
+                        Label("MegaPlay stream unavailable", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
                     if let airDate = selected.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
                 }
                 .padding(11)
@@ -990,7 +1000,9 @@ struct EpisodePanel: View {
                                 Text(episode.overview.isEmpty ? "No description available." : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
                             }
                             Spacer()
-                            Image(systemName: "play.fill").font(.caption).foregroundStyle(frostOrange)
+                            Image(systemName: media.kind == .anime && episode.playbackURL == nil ? "exclamationmark.circle" : "play.fill")
+                                .font(.caption)
+                                .foregroundStyle(media.kind == .anime && episode.playbackURL == nil ? .orange : frostOrange)
                         }
                         .padding(10)
                         .background(episode.number == selectedEpisode ? frostOrange.opacity(0.14) : Color.white.opacity(0.045))
@@ -1102,6 +1114,8 @@ struct PlayerView: View {
         }
         .background(Color.black)
         .ignoresSafeArea()
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
         .onAppear { store.recordWatch(media) }
         .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
         .toolbar(.hidden, for: .navigationBar)

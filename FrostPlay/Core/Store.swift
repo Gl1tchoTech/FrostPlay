@@ -126,7 +126,7 @@ final class FrostPlayStore: ObservableObject {
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
         if media.kind == .anime {
             guard media.aniListID != nil else { return [] }
-            let episodes = (try? await anilist.episodes(for: media)) ?? []
+            let episodes = (try? await anilist.episodes(for: media, language: settings.preferredAnimeLanguage)) ?? []
             let count = media.episodeCount ?? episodes.count
             guard count > 0 || !episodes.isEmpty else { return [] }
             return [SeasonEpisodeInfo(season: 1, episodeCount: max(count, episodes.count), episodes: episodes)]

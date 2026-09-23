@@ -8,8 +8,8 @@ struct PlaybackResolver {
 
     func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1, preferredURL: URL? = nil) -> PlaybackFormat? {
         if media.kind == .anime,
-           let preferredURL,
-           preferredURL.host?.contains("megaplay.buzz") == true {
+           media.tmdbID == nil,
+           let preferredURL = MegaPlayURL.validated(preferredURL) {
             return .embed(preferredURL)
         }
         let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.vidLink, .moviesAPI]
@@ -80,7 +80,12 @@ struct EmbedPlayer: UIViewRepresentable {
         webView.scrollView.isScrollEnabled = false
         webView.isOpaque = false
         webView.backgroundColor = .black
-        webView.load(URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30))
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        // MegaPlay rejects embeds without a same-site navigation context.
+        request.setValue("https://megaplay.buzz/", forHTTPHeaderField: "Referer")
+        request.setValue("https://megaplay.buzz", forHTTPHeaderField: "Origin")
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        webView.load(request)
         return webView
     }
     func updateUIView(_ webView: WKWebView, context: Context) {}
