@@ -1,5 +1,15 @@
 import Foundation
 import SwiftUI
+import WebKit
+
+enum CacheCategory: String, CaseIterable, Identifiable {
+    case networkAndImages = "Network & images"
+    case webKit = "WebKit data"
+    case temporaryFiles = "Other cache & temp"
+    case animeCatalog = "Anime catalog"
+
+    var id: String { rawValue }
+}
 
 @MainActor
 final class FrostPlayStore: ObservableObject {
@@ -10,6 +20,8 @@ final class FrostPlayStore: ObservableObject {
     @Published var searchResults: [MediaItem] = []
     @Published private(set) var animeResults: [MediaItem] = []
     @Published private(set) var animeError: String?
+    @Published private(set) var episodeError: String?
+    @Published private(set) var cacheBreakdown: [CacheCategory: Int] = [:]
     @Published var homeItems: [MediaItem] = [.preview]
     @Published var providerItems: [MediaItem] = []
     @Published var isSearching = false
@@ -124,15 +136,34 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
+        episodeError = nil
         if media.kind == .anime {
-            guard media.aniListID != nil else { return [] }
-            let episodes = (try? await anilist.episodes(for: media, language: settings.preferredAnimeLanguage)) ?? []
-            let count = media.episodeCount ?? episodes.count
-            guard count > 0 || !episodes.isEmpty else { return [] }
-            return [SeasonEpisodeInfo(season: 1, episodeCount: max(count, episodes.count), episodes: episodes)]
+            guard media.aniListID != nil else {
+                episodeError = "AniList ID is missing for this title."
+                return []
+            }
+            do {
+                let episodes = try await anilist.episodes(for: media, language: settings.preferredAnimeLanguage)
+                let count = media.episodeCount ?? episodes.count
+                guard count > 0 || !episodes.isEmpty else {
+                    episodeError = "AniList returned no episode information for this title."
+                    return []
+                }
+                return [SeasonEpisodeInfo(season: 1, episodeCount: max(count, episodes.count), episodes: episodes)]
+            } catch {
+                episodeError = error.localizedDescription
+                return []
+            }
         }
         guard media.kind == .tv, let tmdbID = media.tmdbID else { return [] }
-        return (try? await tmdb.seasons(for: tmdbID)) ?? []
+        do {
+            let seasons = try await tmdb.seasons(for: tmdbID)
+            if seasons.isEmpty { episodeError = "Episode data is unavailable for this title." }
+            return seasons
+        } catch {
+            episodeError = error.localizedDescription
+            return []
+        }
     }
 
     func loadAnimeCatalog() async {
@@ -250,9 +281,70 @@ final class FrostPlayStore: ObservableObject {
         settings.enabledSources.move(fromOffsets: source, toOffset: destination)
     }
 
+    func moveHomeSection(from source: IndexSet, to destination: Int) {
+        settings.homeSections.move(fromOffsets: source, toOffset: destination)
+    }
+
+    func setSource(_ source: PlaybackSource, enabled: Bool) {
+        if enabled {
+            if !settings.enabledSources.contains(source) { settings.enabledSources.append(source) }
+        } else {
+            settings.enabledSources.removeAll { $0 == source }
+        }
+    }
+
     func toggleSource(_ source: PlaybackSource) {
-        if let index = settings.enabledSources.firstIndex(of: source) { settings.enabledSources.remove(at: index) }
-        else { settings.enabledSources.append(source) }
+        setSource(source, enabled: !settings.enabledSources.contains(source))
+    }
+
+    func refreshCacheBreakdown() async {
+        let fileManager = FileManager.default
+        let library = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first
+        let cacheDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let temporaryDirectory = fileManager.temporaryDirectory
+        let webKitDirectory = library?.appendingPathComponent("WebKit", isDirectory: true)
+        let fileBytes = await Task.detached(priority: .utility) {
+            func size(of directory: URL?) -> Int {
+                guard let directory,
+                      let files = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+                return files.compactMap { $0 as? URL }.reduce(0) { total, url in
+                    total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                }
+            }
+            return (size(of: webKitDirectory), size(of: cacheDirectory), size(of: temporaryDirectory))
+        }.value
+        let urlCacheBytes = URLCache.shared.currentDiskUsage + URLCache.shared.currentMemoryUsage
+        cacheBreakdown = [
+            .networkAndImages: urlCacheBytes,
+            .webKit: fileBytes.0,
+            .temporaryFiles: max(0, fileBytes.1 + fileBytes.2 - URLCache.shared.currentDiskUsage),
+            .animeCatalog: await AnikotoCache.cachedByteCount()
+        ]
+    }
+
+    func clearAllCache() async {
+        // Keep removal scoped to transient caches so Documents/downloads and Library/preferences survive.
+        URLCache.shared.removeAllCachedResponses()
+        await AnikotoCache.clear()
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.default().removeData(
+                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                modifiedSince: .distantPast
+            ) {
+                continuation.resume()
+            }
+        }
+        await Task.detached(priority: .utility) {
+            let fileManager = FileManager.default
+            for directory in [
+                fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first,
+                Optional(fileManager.temporaryDirectory)
+            ].compactMap({ $0 }) {
+                guard let contents = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { continue }
+                for url in contents { try? fileManager.removeItem(at: url) }
+            }
+        }.value
+        await refreshCacheBreakdown()
     }
 
     private func save<T: Encodable>(_ value: T, key: String) {

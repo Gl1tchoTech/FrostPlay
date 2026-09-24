@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Darwin
 
 private let frostBackground = Color(red: 0.025, green: 0.025, blue: 0.03)
 private let frostPanel = Color.white.opacity(0.075)
@@ -551,6 +552,7 @@ struct SettingsView: View {
                 NavigationLink { CatalogSettingsView() } label: { SettingsRow(icon: "key", title: "Catalog & API", subtitle: store.isTMDBConfigured ? "TMDB connected" : "TMDB key required") }
                 NavigationLink { SourceSettingsView() } label: { SettingsRow(icon: "arrow.triangle.2.circlepath", title: "Sources", subtitle: "Priority and availability") }
                 NavigationLink { HomeSectionsSettingsView() } label: { SettingsRow(icon: "rectangle.3.group", title: "Home sections", subtitle: "Choose and reorder Home rails") }
+                NavigationLink { CacheSettingsView() } label: { SettingsRow(icon: "internaldrive", title: "Cache", subtitle: "View storage and clear temporary data") }
             }
             .scrollContentBackground(.hidden)
             .background(frostBackground)
@@ -579,6 +581,11 @@ struct AppearanceSettingsView: View {
     var body: some View {
         Form {
             Section("Display") {
+                Picker("Theme", selection: $store.settings.theme) {
+                    Text("Dark").tag(AppTheme.dark)
+                    Text("Light").tag(AppTheme.light)
+                    Text("System").tag(AppTheme.system)
+                }
                 Toggle("Image logos", isOn: $store.settings.showImageLogos)
                 Toggle("Backdrop artwork", isOn: $store.settings.backdropTrailers)
                 Toggle("Reduce motion", isOn: $store.settings.reduceMotion)
@@ -670,8 +677,10 @@ struct HomeSectionsSettingsView: View {
                 Text("Use Edit to drag sections into the order you want on Home.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Order") {
-                ForEach(store.settings.homeSections) { section in Text(section.title) }
-                    .onMove { store.settings.homeSections.move(fromOffsets: $0, toOffset: $1) }
+                ForEach(store.settings.homeSections) { section in
+                    Label(section.title, systemImage: "line.3.horizontal")
+                }
+                .onMove(perform: store.moveHomeSection)
             }
         }
         .navigationTitle("Home sections")
@@ -684,17 +693,113 @@ struct SourceSettingsView: View {
     var body: some View {
         Form {
             Section("Enabled sources") {
-                ForEach(PlaybackSource.implemented) { source in Toggle(source.rawValue, isOn: Binding(get: { store.settings.enabledSources.contains(source) }, set: { _ in store.toggleSource(source) })) }
+                ForEach(PlaybackSource.implemented) { source in
+                    Toggle(source.rawValue, isOn: Binding(
+                        get: { store.settings.enabledSources.contains(source) },
+                        set: { store.setSource(source, enabled: $0) }
+                    ))
+                }
                 Text("Unavailable sources are not silently used. A warning badge appears when a title has no verified source.").font(.footnote).foregroundStyle(.secondary)
+                Text("Tap Edit, then drag sources to change their priority.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Priority") {
-                ForEach(store.settings.enabledSources) { source in Label(source.rawValue, systemImage: source == .megaPlay ? "sparkles" : "play.rectangle.fill") }.onMove { store.moveSource(from: $0, to: $1) }
+                ForEach(store.settings.enabledSources) { source in
+                    Label(source.rawValue, systemImage: source == .megaPlay ? "sparkles" : "play.rectangle.fill")
+                }
+                .onMove(perform: store.moveSource)
             }
         }
         .navigationTitle("Sources")
         .toolbar { EditButton() }
         .scrollContentBackground(.hidden)
         .background(frostBackground)
+    }
+}
+
+struct CacheSettingsView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    @State private var showingClearConfirmation = false
+    @State private var showingClearedConfirmation = false
+    @State private var isClearing = false
+
+    private var totalBytes: Int { store.cacheBreakdown.values.reduce(0, +) }
+
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    Label("Total cached", systemImage: "internaldrive")
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                ForEach(CacheCategory.allCases) { category in
+                    HStack {
+                        Text(category.rawValue)
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(store.cacheBreakdown[category] ?? 0), countStyle: .file))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            } header: {
+                Text("Storage")
+            } footer: {
+                Text("Sizes are approximate. Your saved list, watch history, downloads, and settings are kept when cache is cleared.")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    showingClearConfirmation = true
+                } label: {
+                    HStack {
+                        Spacer()
+                        if isClearing { ProgressView() }
+                        else { Label("Clear all cache", systemImage: "trash") }
+                        Spacer()
+                    }
+                }
+                .disabled(isClearing)
+            } footer: {
+                Text("Clears URL/image cache, WebKit data, temporary files, and the anime catalog cache.")
+            }
+        }
+        .navigationTitle("Cache")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await store.refreshCacheBreakdown() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .accessibilityLabel("Refresh cache sizes")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(frostBackground)
+        .task { await store.refreshCacheBreakdown() }
+        .confirmationDialog("Clear all cached data?", isPresented: $showingClearConfirmation, titleVisibility: .visible) {
+            Button("Clear cache", role: .destructive) {
+                Task {
+                    isClearing = true
+                    await store.clearAllCache()
+                    isClearing = false
+                    showingClearedConfirmation = true
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes temporary cached data. Your library, history, downloads, and settings will remain.")
+        }
+        .alert("Cache cleared", isPresented: $showingClearedConfirmation) {
+            Button("Close app", role: .destructive) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { exit(EXIT_SUCCESS) }
+            }
+            Button("Keep using FrostPlay", role: .cancel) {}
+        } message: {
+            Text("FrostPlay will close. Reopen it to start with a fresh cache.")
+        }
     }
 }
 
@@ -935,9 +1040,11 @@ struct EpisodePanel: View {
 
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
     private var episodes: [EpisodeInfo] {
-        if let episodes = currentSeason?.episodes, !episodes.isEmpty { return episodes }
-        let count = currentSeason?.episodeCount ?? media.episodeCount ?? 0
-        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil) }
+        guard let currentSeason else { return [] }
+        if !currentSeason.episodes.isEmpty { return currentSeason.episodes }
+        return (1...max(currentSeason.episodeCount, 1)).map {
+            EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil)
+        }
     }
 
     var body: some View {
@@ -956,7 +1063,11 @@ struct EpisodePanel: View {
                 .tint(frostOrange)
                 .onChange(of: selectedSeason) { _, _ in selectedEpisode = 1 }
             }
-            if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. Try another title or source.").font(.caption).foregroundStyle(.orange) }
+            if seasons.isEmpty && !isLoading {
+                Text(store.episodeError ?? "Episode data is unavailable. Try another title or source.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             if let selected = episodes.first(where: { $0.number == selectedEpisode }) {
                 VStack(alignment: .leading, spacing: 9) {
                     if let imageURL = selected.imageURL {
