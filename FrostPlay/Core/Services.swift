@@ -229,14 +229,17 @@ struct AnikotoService {
             let matches = response.data.filter { row in
                 let aniListMatch = media.aniListID.map { row.aniID?.value == $0 } ?? false
                 let malMatch = media.malID.map { row.malID?.value == $0 } ?? false
-                let titleMatch = row.aniID == nil && row.malID == nil && [row.title, row.alternative, row.titles, row.native]
+                let titleMatch = media.aniListID == nil && media.malID == nil && row.aniID == nil && row.malID == nil && [row.title, row.alternative, row.titles, row.native]
                     .compactMap { $0 }
                     .flatMap { $0.split(separator: ",").map(String.init) }
                     .contains { wantedTitles.contains(normalized($0)) }
                 if media.aniListID != nil {
-                    return aniListMatch || (row.aniID == nil && malMatch) || titleMatch
+                    return aniListMatch || (row.aniID == nil && malMatch)
                 }
-                return malMatch || titleMatch
+                if media.malID != nil {
+                    return malMatch
+                }
+                return titleMatch
             }
             for match in matches {
                 if let series = try? await fetchSeries(id: String(match.id)), series.anime.matches(media: media) {
@@ -374,9 +377,13 @@ private struct AnikotoAnime: Decodable {
     }
 
     func matches(media: MediaItem) -> Bool {
-        if let requestedAniListID = media.aniListID, let aniID { return aniID.value == requestedAniListID }
-        if media.aniListID == nil, let requestedMALID = media.malID, let malID { return malID.value == requestedMALID }
-        if aniID != nil || malID != nil { return false }
+        if let requestedAniListID = media.aniListID {
+            if let aniID { return aniID.value == requestedAniListID }
+            return media.malID.map { malID?.value == $0 } ?? false
+        }
+        if let requestedMALID = media.malID {
+            return malID?.value == requestedMALID
+        }
         let wanted = normalized(media.title)
         return [title, alternative, titles, native].compactMap { $0 }
             .flatMap { $0.split(separator: ",").map(String.init) }
@@ -503,7 +510,7 @@ struct AniListService: MetadataService {
         // AniList can return several streaming links for the same episode. Keep one
         // metadata row per episode instead of trapping in Dictionary(uniqueKeysWithValues:).
         var anilistByNumber: [Int: AniListEpisodesResponse.Episode] = [:]
-        for (index, item) in (aniListMedia?.streamingEpisodes ?? []).enumerated() {
+        for (index, item) in (aniListMedia.streamingEpisodes ?? []).enumerated() {
             let number = episodeNumber(from: item.title, fallback: index + 1)
             if let existing = anilistByNumber[number], existing.thumbnail != nil || item.thumbnail == nil { continue }
             anilistByNumber[number] = item
