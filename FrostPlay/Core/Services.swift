@@ -186,6 +186,32 @@ private actor AnikotoRecentPageCache {
 
     func data(for key: String) -> Data? { pages[key] }
     func store(_ data: Data, for key: String) { pages[key] = data }
+    func cachedByteCount() -> Int { pages.values.reduce(0) { $0 + $1.count } }
+    func clear() { pages.removeAll() }
+}
+
+enum AnikotoCache {
+    static func cachedByteCount() async -> Int {
+        await AnikotoRecentPageCache.shared.cachedByteCount()
+    }
+
+    static func clear() async {
+        await AnikotoRecentPageCache.shared.clear()
+    }
+}
+
+private actor AnikotoRequestThrottle {
+    static let shared = AnikotoRequestThrottle()
+    private var nextRequestAt = Date.distantPast
+
+    func waitForTurn() async throws {
+        let now = Date()
+        let delay = max(0, nextRequestAt.timeIntervalSince(now))
+        nextRequestAt = max(now, nextRequestAt).addingTimeInterval(2.1)
+        if delay > 0 {
+            try await Task.sleep(for: .milliseconds(Int64((delay * 1_000).rounded(.up))))
+        }
+    }
 }
 
 struct AnikotoService {
@@ -220,23 +246,25 @@ struct AnikotoService {
         ].map(normalized))
         // The endpoint caps per_page at 100. Recent titles are near the front, while
         // older catalog entries can be many pages deep. Cache pages per app session and
-        // stay below its published 60-requests/120s limit while searching by external ID.
+        // throttle all Anikoto requests to remain under its published request limit.
         let providerPage = 1...55
         for page in providerPage {
             if Task.isCancelled { throw CancellationError() }
-            if page > 1 { try await Task.sleep(for: .milliseconds(250)) }
             let response = try await fetchRecent(page: page, perPage: 100)
             let matches = response.data.filter { row in
                 let aniListMatch = media.aniListID.map { row.aniID?.value == $0 } ?? false
                 let malMatch = media.malID.map { row.malID?.value == $0 } ?? false
-                let titleMatch = row.aniID == nil && row.malID == nil && [row.title, row.alternative, row.titles, row.native]
+                let titleMatch = media.aniListID == nil && media.malID == nil && row.aniID == nil && row.malID == nil && [row.title, row.alternative, row.titles, row.native]
                     .compactMap { $0 }
                     .flatMap { $0.split(separator: ",").map(String.init) }
                     .contains { wantedTitles.contains(normalized($0)) }
                 if media.aniListID != nil {
-                    return aniListMatch || (row.aniID == nil && malMatch) || titleMatch
+                    return aniListMatch || (row.aniID == nil && malMatch)
                 }
-                return malMatch || titleMatch
+                if media.malID != nil {
+                    return malMatch
+                }
+                return titleMatch
             }
             for match in matches {
                 if let series = try? await fetchSeries(id: String(match.id)), series.anime.matches(media: media) {
@@ -253,6 +281,7 @@ struct AnikotoService {
     }
 
     private func fetchSeries(id: String) async throws -> AnikotoSeries {
+        try await AnikotoRequestThrottle.shared.waitForTurn()
         let data = try await request(path: "series/\(id)")
         let response = try JSONDecoder().decode(AnikotoSeriesResponse.self, from: data)
         guard response.ok else { throw FrostPlayServiceError.invalidResponse }
@@ -269,6 +298,7 @@ struct AnikotoService {
             URLQueryItem(name: "page", value: String(page)),
             URLQueryItem(name: "per_page", value: String(perPage))
         ]
+        try await AnikotoRequestThrottle.shared.waitForTurn()
         var request = URLRequest(url: components.url!)
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)
@@ -374,9 +404,13 @@ private struct AnikotoAnime: Decodable {
     }
 
     func matches(media: MediaItem) -> Bool {
-        if let requestedAniListID = media.aniListID, let aniID { return aniID.value == requestedAniListID }
-        if media.aniListID == nil, let requestedMALID = media.malID, let malID { return malID.value == requestedMALID }
-        if aniID != nil || malID != nil { return false }
+        if let requestedAniListID = media.aniListID {
+            if let aniID { return aniID.value == requestedAniListID }
+            return media.malID.map { malID?.value == $0 } ?? false
+        }
+        if let requestedMALID = media.malID {
+            return malID?.value == requestedMALID
+        }
         let wanted = normalized(media.title)
         return [title, alternative, titles, native].compactMap { $0 }
             .flatMap { $0.split(separator: ",").map(String.init) }
@@ -503,12 +537,18 @@ struct AniListService: MetadataService {
         // AniList can return several streaming links for the same episode. Keep one
         // metadata row per episode instead of trapping in Dictionary(uniqueKeysWithValues:).
         var anilistByNumber: [Int: AniListEpisodesResponse.Episode] = [:]
-        for (index, item) in (aniListMedia?.streamingEpisodes ?? []).enumerated() {
+        let presentationEpisodes = aniListMedia.streamingEpisodes ?? []
+        for (index, item) in presentationEpisodes.enumerated() {
             let number = episodeNumber(from: item.title, fallback: index + 1)
             if let existing = anilistByNumber[number], existing.thumbnail != nil || item.thumbnail == nil { continue }
             anilistByNumber[number] = item
         }
-        let streamsByNumber = Dictionary(anikotoEpisodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
+        let streamsByNumber = Dictionary(
+            anikotoEpisodes.map { ($0.number, $0) },
+            uniquingKeysWith: { existing, candidate in
+                existing.playbackURL == nil ? candidate : existing
+            }
+        )
         var episodeNumbers = Set(anilistByNumber.keys).union(streamsByNumber.keys)
         if let episodeCount = aniListMedia.episodes ?? media.episodeCount, episodeCount > 0 {
             episodeNumbers.formUnion(1...min(episodeCount, 1_000))
