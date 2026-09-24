@@ -175,9 +175,17 @@ enum MegaPlayURL {
     }
 }
 
-private struct AnimeStreamEpisode {
+fileprivate struct AnimeStreamEpisode {
     let number: Int
     let playbackURL: URL?
+}
+
+private actor AnikotoRecentPageCache {
+    static let shared = AnikotoRecentPageCache()
+    private var pages: [String: Data] = [:]
+
+    func data(for key: String) -> Data? { pages[key] }
+    func store(_ data: Data, for key: String) { pages[key] = data }
 }
 
 struct AnikotoService {
@@ -210,23 +218,36 @@ struct AnikotoService {
             media.title,
             media.title.replacingOccurrences(of: "&amp;", with: "&")
         ].map(normalized))
-        for page in 1...10 {
-            let rows = try await fetchRecent(page: page, perPage: 1000)
-            let matches = rows.filter { row in
+        // The endpoint caps per_page at 100. Recent titles are near the front, while
+        // older catalog entries can be many pages deep. Cache pages per app session and
+        // stay below its published 60-requests/120s limit while searching by external ID.
+        let providerPage = 1...55
+        for page in providerPage {
+            if Task.isCancelled { throw CancellationError() }
+            if page > 1 { try await Task.sleep(for: .milliseconds(250)) }
+            let response = try await fetchRecent(page: page, perPage: 100)
+            let matches = response.data.filter { row in
                 let aniListMatch = media.aniListID.map { row.aniID?.value == $0 } ?? false
                 let malMatch = media.malID.map { row.malID?.value == $0 } ?? false
-                let titleMatch = [row.title, row.alternative, row.titles, row.native]
+                let titleMatch = row.aniID == nil && row.malID == nil && [row.title, row.alternative, row.titles, row.native]
                     .compactMap { $0 }
                     .flatMap { $0.split(separator: ",").map(String.init) }
                     .contains { wantedTitles.contains(normalized($0)) }
-                return aniListMatch || malMatch || titleMatch
+                if media.aniListID != nil {
+                    return aniListMatch || (row.aniID == nil && malMatch) || titleMatch
+                }
+                return malMatch || titleMatch
             }
             for match in matches {
                 if let series = try? await fetchSeries(id: String(match.id)), series.anime.matches(media: media) {
                     return series
                 }
             }
-            if rows.count < 1000 { break }
+            // Anikoto's pagination metadata is calculated before its 100-row cap is
+            // applied. Use the effective page size instead of trusting total_pages.
+            let total = response.pagination?.total ?? response.data.count
+            let pageCount = (total + 99) / 100
+            if page >= pageCount || response.data.isEmpty { break }
         }
         throw FrostPlayServiceError.invalidResponse
     }
@@ -238,12 +259,24 @@ struct AnikotoService {
         return response.data
     }
 
-    private func fetchRecent(page: Int, perPage: Int = 100) async throws -> [AnikotoRecentAnime] {
-        let data = try await request(path: "recent-anime", query: [
+    private func fetchRecent(page: Int, perPage: Int = 100) async throws -> AnikotoRecentResponse {
+        let cacheKey = "\(page):\(perPage)"
+        if let cached = await AnikotoRecentPageCache.shared.data(for: cacheKey) {
+            return try JSONDecoder().decode(AnikotoRecentResponse.self, from: cached)
+        }
+        var components = URLComponents(url: baseURL.appendingPathComponent("recent-anime"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
             URLQueryItem(name: "page", value: String(page)),
             URLQueryItem(name: "per_page", value: String(perPage))
-        ])
-        return try JSONDecoder().decode(AnikotoRecentResponse.self, from: data).data
+        ]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        await AnikotoRecentPageCache.shared.store(data, for: cacheKey)
+        return try JSONDecoder().decode(AnikotoRecentResponse.self, from: data)
     }
 
     private func request(path: String, query: [URLQueryItem] = []) async throws -> Data {
@@ -270,6 +303,19 @@ private struct AnikotoSeriesResponse: Decodable {
 
 private struct AnikotoRecentResponse: Decodable {
     let data: [AnikotoRecentAnime]
+    let pagination: Pagination?
+
+    enum CodingKeys: String, CodingKey {
+        case data, pagination
+    }
+
+    struct Pagination: Decodable {
+        let total: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case total
+        }
+    }
 }
 
 private struct AnikotoRecentAnime: Decodable {
@@ -286,11 +332,19 @@ private struct AnikotoRecentAnime: Decodable {
         case aniID = "ani_id"
         case malID = "mal_id"
     }
-}
 
-private struct AnikotoSeries: Decodable {
-    let anime: AnikotoAnime
-    let episodes: [AnikotoEpisode]
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        alternative = try container.decodeIfPresent(String.self, forKey: .alternative)
+        titles = try container.decodeIfPresent(String.self, forKey: .titles)
+        native = try container.decodeIfPresent(String.self, forKey: .native)
+        // Anikoto uses empty strings for missing external IDs. Treat those as nil
+        // instead of failing to decode the entire page of otherwise valid records.
+        aniID = try? container.decode(FlexibleInt.self, forKey: .aniID)
+        malID = try? container.decode(FlexibleInt.self, forKey: .malID)
+    }
 }
 
 private struct AnikotoAnime: Decodable {
@@ -308,9 +362,21 @@ private struct AnikotoAnime: Decodable {
         case malID = "mal_id"
     }
 
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(Int.self, forKey: .id)
+        aniID = try? container.decode(FlexibleInt.self, forKey: .aniID)
+        malID = try? container.decode(FlexibleInt.self, forKey: .malID)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        alternative = try container.decodeIfPresent(String.self, forKey: .alternative)
+        titles = try container.decodeIfPresent(String.self, forKey: .titles)
+        native = try container.decodeIfPresent(String.self, forKey: .native)
+    }
+
     func matches(media: MediaItem) -> Bool {
-        if let requestedAniListID = media.aniListID, aniID?.value == requestedAniListID { return true }
-        if let requestedMALID = media.malID, malID?.value == requestedMALID { return true }
+        if let requestedAniListID = media.aniListID, let aniID { return aniID.value == requestedAniListID }
+        if media.aniListID == nil, let requestedMALID = media.malID, let malID { return malID.value == requestedMALID }
+        if aniID != nil || malID != nil { return false }
         let wanted = normalized(media.title)
         return [title, alternative, titles, native].compactMap { $0 }
             .flatMap { $0.split(separator: ",").map(String.init) }
@@ -320,6 +386,11 @@ private struct AnikotoAnime: Decodable {
     private func normalized(_ value: String) -> String {
         value.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
     }
+}
+
+private struct AnikotoSeries: Decodable {
+    let anime: AnikotoAnime
+    let episodes: [AnikotoEpisode]
 }
 
 private struct AnikotoEpisode: Decodable {
@@ -349,6 +420,7 @@ private struct FlexibleInt: Decodable {
 }
 
 struct AniListService: MetadataService {
+
     let session: URLSession = .shared
     let endpoint = URL(string: "https://graphql.anilist.co")!
 
@@ -379,15 +451,14 @@ struct AniListService: MetadataService {
         }
     }
 
-    func episodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {            guard let aniListID = media.aniListID else { return [] }
+    func episodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {
+        guard let aniListID = media.aniListID else { return [] }
 
-            // AniList's streamingEpisodes are presentation metadata only; their URLs
-
+        // AniList's streamingEpisodes are presentation metadata only; their URLs
         // are intentionally ignored because playback must always resolve via MegaPlay.
         let queryText = """
         query ($id: Int) {
           Media(id: $id, type: ANIME) {
-            description
             episodes
             streamingEpisodes { title thumbnail url }
           }
@@ -400,36 +471,46 @@ struct AniListService: MetadataService {
         request.timeoutInterval = 20
 
         var aniListMedia: AniListEpisodesResponse.Media?
+        var anilistError: Error?
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
                 throw FrostPlayServiceError.invalidResponse
             }
-            aniListMedia = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data).data.media
+            let payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
+            aniListMedia = payload.data?.media
+            if aniListMedia == nil { throw FrostPlayServiceError.decodingFailed }
         } catch {
-            // AniList owns the metadata; without it, don't substitute stream-catalog details.
-            return []
+            anilistError = error
         }
-        guard let aniListMedia else { return [] }
 
-        let seriesOverview = (aniListMedia.description ?? media.overview)
-            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        // Resolve streams regardless of AniList's streamingEpisodes response. AniList
+        // owns display metadata; Anikoto contributes only the MegaPlay episode URLs.
         let anikotoEpisodes = (try? await AnikotoService().episodes(
             for: media,
             language: language
         )) ?? []
+        guard aniListMedia != nil else {
+            if anikotoEpisodes.isEmpty { throw anilistError ?? FrostPlayServiceError.invalidResponse }
+            // Don't display Anikoto's episode labels/art as metadata. Keep its streams
+            // usable while clearly marking AniList-only fields absent.
+            return anikotoEpisodes.map { stream in
+                EpisodeInfo(number: stream.number, name: "Episode \(stream.number)", overview: "", airDate: nil, imageURL: nil, playbackURL: stream.playbackURL)
+            }
+        }
+        guard let aniListMedia else { return [] }
 
         // AniList can return several streaming links for the same episode. Keep one
         // metadata row per episode instead of trapping in Dictionary(uniqueKeysWithValues:).
         var anilistByNumber: [Int: AniListEpisodesResponse.Episode] = [:]
-        for (index, item) in (aniListMedia.streamingEpisodes ?? []).enumerated() {
-            let number = item.title?.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first ?? index + 1
+        for (index, item) in (aniListMedia?.streamingEpisodes ?? []).enumerated() {
+            let number = episodeNumber(from: item.title, fallback: index + 1)
             if let existing = anilistByNumber[number], existing.thumbnail != nil || item.thumbnail == nil { continue }
             anilistByNumber[number] = item
         }
         let streamsByNumber = Dictionary(anikotoEpisodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
         var episodeNumbers = Set(anilistByNumber.keys).union(streamsByNumber.keys)
-        if let episodeCount = aniListMedia.episodes, episodeCount > 0 {
+        if let episodeCount = aniListMedia.episodes ?? media.episodeCount, episodeCount > 0 {
             episodeNumbers.formUnion(1...min(episodeCount, 1_000))
         }
 
@@ -438,16 +519,31 @@ struct AniListService: MetadataService {
         return episodeNumbers.sorted().map { number in
             let metadataEpisode = anilistByNumber[number]
             let streamEpisode = streamsByNumber[number]
-            let title = metadataEpisode?.title?.isEmpty == false ? metadataEpisode!.title! : "Episode \(number)"
+            let title = metadataEpisode?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
             return EpisodeInfo(
                 number: number,
-                name: title,
-                overview: seriesOverview,
+                name: title.flatMap { $0.isEmpty ? nil : $0 } ?? "Episode \(number)",
+                // AniList exposes series synopsis, not an episode synopsis field.
+                overview: "",
                 airDate: nil,
-                imageURL: metadataEpisode?.thumbnail.flatMap(URL.init) ?? media.posterURL,
+                imageURL: metadataEpisode?.thumbnail.flatMap(URL.init),
                 playbackURL: streamEpisode?.playbackURL
             )
         }
+    }
+
+    private func episodeNumber(from title: String?, fallback: Int) -> Int {
+        guard let title, !title.isEmpty else { return fallback }
+        let patterns = [#"(?i)\b(?:episode|ep)\s*#?\s*(\d+)\b"#, #"(?i)^\s*(\d{1,3})(?:\s|[.:\-–])"#]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: title),
+                  let number = Int(title[range]), number > 0 else { continue }
+            return number
+        }
+        return fallback
     }
 
     func search(query: String, kind: MediaKind?, page: Int = 1) async throws -> [MediaItem] {
@@ -652,14 +748,17 @@ private struct TMDBResult: Decodable {
 }
 
 private struct AniListEpisodesResponse: Decodable {
-    let data: DataContainer
+    let data: DataContainer?
 
     struct DataContainer: Decodable {
-        let media: Media
+        let media: Media?
+
+        enum CodingKeys: String, CodingKey {
+            case media = "Media"
+        }
     }
 
     struct Media: Decodable {
-        let description: String?
         let episodes: Int?
         let streamingEpisodes: [Episode]?
     }
@@ -676,6 +775,10 @@ private struct AniListMetadataResponse: Decodable {
 
     struct DataContainer: Decodable {
         let media: Media
+
+        enum CodingKeys: String, CodingKey {
+            case media = "Media"
+        }
     }
 
     struct Media: Decodable {

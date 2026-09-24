@@ -937,7 +937,7 @@ struct EpisodePanel: View {
     private var episodes: [EpisodeInfo] {
         if let episodes = currentSeason?.episodes, !episodes.isEmpty { return episodes }
         let count = currentSeason?.episodeCount ?? media.episodeCount ?? 0
-        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "Episode description unavailable.", airDate: nil, imageURL: nil) }
+        return (1...max(count, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil) }
     }
 
     var body: some View {
@@ -959,13 +959,13 @@ struct EpisodePanel: View {
             if seasons.isEmpty && !isLoading { Text("Episode data is unavailable. Try another title or source.").font(.caption).foregroundStyle(.orange) }
             if let selected = episodes.first(where: { $0.number == selectedEpisode }) {
                 VStack(alignment: .leading, spacing: 9) {
-                    if let imageURL = selected.imageURL ?? (media.kind == .anime ? media.posterURL : nil) {
+                    if let imageURL = selected.imageURL {
                         Poster(url: imageURL, width: nil, height: 170)
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     Text("Episode \(selected.number) · \(selected.name)").font(.subheadline.bold()).foregroundStyle(.white)
-                    Text(selected.overview.isEmpty ? "Episode details are not available from the catalog." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    Text(selected.overview.isEmpty ? "No episode-specific details are published by AniList for this title." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
                     if media.kind == .anime && selected.playbackURL == nil {
                         Label("MegaPlay stream unavailable", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2.weight(.medium))
@@ -982,7 +982,7 @@ struct EpisodePanel: View {
                 ForEach(episodes) { episode in
                     NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number, preferredPlaybackURL: episode.playbackURL)) {
                         HStack(alignment: .top, spacing: 11) {
-                            if let imageURL = episode.imageURL ?? (media.kind == .anime ? media.posterURL : nil) {
+                            if let imageURL = episode.imageURL {
                                 Poster(url: imageURL, width: 92, height: 58)
                             } else {
                                 ZStack {
@@ -997,7 +997,7 @@ struct EpisodePanel: View {
                                     .truncationMode(.tail)
                                     .foregroundStyle(.white)
                                 if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
-                                Text(episode.overview.isEmpty ? "No description available." : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
+                                Text(episode.overview.isEmpty ? (media.kind == .anime ? "No episode-specific details on AniList." : "No description available.") : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
                             }
                             Spacer()
                             Image(systemName: media.kind == .anime && episode.playbackURL == nil ? "exclamationmark.circle" : "play.fill")
