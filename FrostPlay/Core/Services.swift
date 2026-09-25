@@ -271,11 +271,14 @@ struct AnikotoService {
                     return series
                 }
             }
-            // Anikoto's pagination metadata is calculated before its 100-row cap is
-            // applied. Use the effective page size instead of trusting total_pages.
+            // The recent endpoint exposes a bounded feed, not a reliable full-catalog
+            // search. Stop when this page has no records rather than stalling UI flows
+            // behind dozens of throttled requests for older titles.
+            if response.data.isEmpty { break }
+            // Continue through its reported pages, but keep stream lookup bounded.
             let total = response.pagination?.total ?? response.data.count
-            let pageCount = (total + 99) / 100
-            if page >= pageCount || response.data.isEmpty { break }
+            let pageCount = min((total + 99) / 100, 55)
+            if page >= pageCount { break }
         }
         throw FrostPlayServiceError.invalidResponse
     }
@@ -466,6 +469,10 @@ struct AniListService: MetadataService {
             averageScore
             status
             format
+            countryOfOrigin
+            duration
+            source
+            studios(isMain: true) { nodes { name } }
           }
         }
         """
@@ -479,22 +486,27 @@ struct AniListService: MetadataService {
             throw FrostPlayServiceError.invalidResponse
         }
         do {
-            return try JSONDecoder().decode(AniListMetadataResponse.self, from: data).data.media.metadata
+            let payload = try JSONDecoder().decode(AniListMetadataResponse.self, from: data)
+            guard let media = payload.data?.media else { throw FrostPlayServiceError.decodingFailed }
+            return media.metadata
         } catch {
             throw FrostPlayServiceError.decodingFailed
         }
     }
 
-    func episodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {
-        guard let aniListID = media.aniListID else { return [] }
+    func episodes(for media: MediaItem) async throws -> [EpisodeInfo] {
+        guard media.kind == .anime, let aniListID = media.aniListID else { return [] }
 
-        // AniList's streamingEpisodes are presentation metadata only; their URLs
-        // are intentionally ignored because playback must always resolve via MegaPlay.
+        // AniList does not reliably publish streamingEpisodes. The count is enough
+        // to show a stable catalog while playback URLs are resolved separately.
+        if let episodeCount = media.episodeCount, episodeCount > 0 {
+            return makeEpisodeRows(count: episodeCount)
+        }
+
         let queryText = """
         query ($id: Int) {
           Media(id: $id, type: ANIME) {
             episodes
-            streamingEpisodes { title thumbnail url }
           }
         }
         """
@@ -504,70 +516,51 @@ struct AniListService: MetadataService {
         ])
         request.timeoutInterval = 20
 
-        var aniListMedia: AniListEpisodesResponse.Media?
-        var anilistError: Error?
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        let payload: AniListEpisodesResponse
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
-                throw FrostPlayServiceError.invalidResponse
-            }
-            let payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
-            aniListMedia = payload.data?.media
-            if aniListMedia == nil { throw FrostPlayServiceError.decodingFailed }
+            payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
         } catch {
-            anilistError = error
+            throw FrostPlayServiceError.decodingFailed
+        }
+        guard let aniListMedia = payload.data?.media else {
+            throw FrostPlayServiceError.decodingFailed
         }
 
-        // Resolve streams regardless of AniList's streamingEpisodes response. AniList
-        // owns display metadata; Anikoto contributes only the MegaPlay episode URLs.
-        let anikotoEpisodes = (try? await AnikotoService().episodes(
-            for: media,
-            language: language
-        )) ?? []
-        guard aniListMedia != nil else {
-            if anikotoEpisodes.isEmpty { throw anilistError ?? FrostPlayServiceError.invalidResponse }
-            // Don't display Anikoto's episode labels/art as metadata. Keep its streams
-            // usable while clearly marking AniList-only fields absent.
-            return anikotoEpisodes.map { stream in
-                EpisodeInfo(number: stream.number, name: "Episode \(stream.number)", overview: "", airDate: nil, imageURL: nil, playbackURL: stream.playbackURL)
-            }
+        // AniList does not consistently publish episode-level titles, artwork, or
+        // synopses. Use its episode count and avoid fabricating episode metadata.
+        guard let episodeCount = aniListMedia.episodes ?? media.episodeCount, episodeCount > 0 else {
+            return []
         }
-        guard let aniListMedia else { return [] }
+        return makeEpisodeRows(count: episodeCount)
+    }
 
-        // AniList can return several streaming links for the same episode. Keep one
-        // metadata row per episode instead of trapping in Dictionary(uniqueKeysWithValues:).
-        var anilistByNumber: [Int: AniListEpisodesResponse.Episode] = [:]
-        let presentationEpisodes = aniListMedia.streamingEpisodes ?? []
-        for (index, item) in presentationEpisodes.enumerated() {
-            let number = episodeNumber(from: item.title, fallback: index + 1)
-            if let existing = anilistByNumber[number], existing.thumbnail != nil || item.thumbnail == nil { continue }
-            anilistByNumber[number] = item
-        }
-        let streamsByNumber = Dictionary(
-            anikotoEpisodes.map { ($0.number, $0) },
-            uniquingKeysWith: { existing, candidate in
-                existing.playbackURL == nil ? candidate : existing
-            }
-        )
-        var episodeNumbers = Set(anilistByNumber.keys).union(streamsByNumber.keys)
-        if let episodeCount = aniListMedia.episodes ?? media.episodeCount, episodeCount > 0 {
-            episodeNumbers.formUnion(1...min(episodeCount, 1_000))
-        }
-
-        // AniList supplies every visible field and the canonical episode count;
-        // Anikoto contributes only stream URLs.
-        return episodeNumbers.sorted().map { number in
-            let metadataEpisode = anilistByNumber[number]
-            let streamEpisode = streamsByNumber[number]
-            let title = metadataEpisode?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return EpisodeInfo(
+    private func makeEpisodeRows(count: Int) -> [EpisodeInfo] {
+        (1...min(count, 1_000)).map { number in
+            EpisodeInfo(
                 number: number,
-                name: title.flatMap { $0.isEmpty ? nil : $0 } ?? "Episode \(number)",
-                // AniList exposes series synopsis, not an episode synopsis field.
+                name: "Episode \(number)",
                 overview: "",
                 airDate: nil,
-                imageURL: metadataEpisode?.thumbnail.flatMap(URL.init),
-                playbackURL: streamEpisode?.playbackURL
+                imageURL: nil,
+                playbackURL: nil
+            )
+        }
+    }
+
+    func playbackEpisodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {
+        let streams = try await AnikotoService().episodes(for: media, language: language)
+        return streams.map { stream in
+            EpisodeInfo(
+                number: stream.number,
+                name: "Episode \(stream.number)",
+                overview: "",
+                airDate: nil,
+                imageURL: nil,
+                playbackURL: stream.playbackURL
             )
         }
     }
@@ -605,6 +598,10 @@ struct AniListService: MetadataService {
                   averageScore
                   status
                   format
+                  countryOfOrigin
+                  duration
+                  source
+                  studios(isMain: true) { nodes { name } }
                   coverImage { large }
                   bannerImage
                 }
@@ -627,6 +624,10 @@ struct AniListService: MetadataService {
                   averageScore
                   status
                   format
+                  countryOfOrigin
+                  duration
+                  source
+                  studios(isMain: true) { nodes { name } }
                   coverImage { large }
                   bannerImage
                 }
@@ -660,7 +661,7 @@ struct AniListService: MetadataService {
                     providerNames: ["MegaPlay"],
                     year: anime.seasonYear.map(String.init),
                     episodeCount: anime.episodes,
-                    metadata: MediaMetadata(genres: anime.genres ?? [], score: anime.averageScore, status: anime.status, format: anime.format)
+                    metadata: anime.metadata
                 )
             }
         } catch {
@@ -800,21 +801,14 @@ private struct AniListEpisodesResponse: Decodable {
 
     struct Media: Decodable {
         let episodes: Int?
-        let streamingEpisodes: [Episode]?
-    }
-
-    struct Episode: Decodable {
-        let title: String?
-        let thumbnail: String?
-        let url: String?
     }
 }
 
 private struct AniListMetadataResponse: Decodable {
-    let data: DataContainer
+    let data: DataContainer?
 
     struct DataContainer: Decodable {
-        let media: Media
+        let media: Media?
 
         enum CodingKeys: String, CodingKey {
             case media = "Media"
@@ -826,9 +820,30 @@ private struct AniListMetadataResponse: Decodable {
         let averageScore: Int?
         let status: String?
         let format: String?
+        let countryOfOrigin: String?
+        let duration: Int?
+        let source: String?
+        let studios: StudioConnection?
 
         var metadata: MediaMetadata {
-            MediaMetadata(genres: genres ?? [], score: averageScore, status: status, format: format)
+            MediaMetadata(
+                genres: genres ?? [],
+                score: averageScore,
+                status: status,
+                format: format,
+                countryOfOrigin: countryOfOrigin,
+                durationMinutes: duration,
+                source: source,
+                studios: (studios?.nodes ?? []).map { $0.name }
+            )
+        }
+
+        struct StudioConnection: Decodable {
+            let nodes: [Studio]?
+        }
+
+        struct Studio: Decodable {
+            let name: String
         }
     }
 }
@@ -864,6 +879,26 @@ private struct AniListResponse: Decodable {
         let format: String?
         let coverImage: Cover?
         let bannerImage: String?
+        let countryOfOrigin: String?
+        let duration: Int?
+        let source: String?
+        let studios: StudioConnection?
+
+        var metadata: MediaMetadata {
+            MediaMetadata(
+                genres: genres ?? [],
+                score: averageScore,
+                status: status,
+                format: format,
+                countryOfOrigin: countryOfOrigin,
+                durationMinutes: duration,
+                source: source,
+                studios: (studios?.nodes ?? []).map { $0.name }
+            )
+        }
+
+        struct StudioConnection: Decodable { let nodes: [Studio]? }
+        struct Studio: Decodable { let name: String }
     }
     struct Title: Decodable { let romaji: String?; let english: String?; let native: String? }
     struct Cover: Decodable { let large: String? }

@@ -906,6 +906,7 @@ struct DetailView: View {
     @State private var isLoadingEpisodes = false
     @State private var showingSourcePicker = false
     @State private var refreshedAnimeMetadata: MediaMetadata?
+    @State private var isLoadingAnimeMetadata = false
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
 
     var body: some View {
@@ -923,18 +924,32 @@ struct DetailView: View {
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     DetailBadge(label: media.kind == .anime ? "AniList" : "TMDB", icon: "checkmark.seal.fill")
-                    if let episodeCount = media.episodeCount, episodeCount > 0 {
+                    if let episodeCount = media.episodeCount, episodeCount > 0,
+                       media.kind != .anime || (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() != "MOVIE" {
                         DetailBadge(label: "\(episodeCount) episodes", icon: "list.number")
                     }
                     if let source = media.providerNames.first {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
                 }
-                if media.kind == .anime, let metadata = refreshedAnimeMetadata ?? media.metadata {
-                    HStack(spacing: 8) {
-                        if let format = metadata.format { DetailBadge(label: format.capitalized, icon: "tv") }
-                        if let score = metadata.score { DetailBadge(label: "Score \(score)%", icon: "star.fill") }
-                        if let status = metadata.status { DetailBadge(label: status.capitalized, icon: "info.circle") }
+                if media.kind == .anime,
+                   let metadata = refreshedAnimeMetadata ?? media.metadata,
+                   metadata.hasDetails {
+                    if metadata.format != nil || metadata.score != nil || metadata.status != nil {
+                        HStack(spacing: 8) {
+                            if let format = metadata.format { DetailBadge(label: format.capitalized, icon: "tv") }
+                            if let score = metadata.score { DetailBadge(label: "Score \(score)%", icon: "star.fill") }
+                            if let status = metadata.status { DetailBadge(label: status.capitalized, icon: "info.circle") }
+                        }
+                    }
+                    if metadata.countryOfOrigin != nil || metadata.durationMinutes != nil || metadata.source != nil {
+                        HStack(spacing: 8) {
+                            if let country = metadata.countryOfOrigin { DetailBadge(label: country, icon: "globe") }
+                            if let duration = metadata.durationMinutes, duration > 0 {
+                                DetailBadge(label: "\(duration) min\(metadata.format?.uppercased() == "MOVIE" ? "" : " / ep")", icon: "clock")
+                            }
+                            if let source = metadata.source { DetailBadge(label: source.replacingOccurrences(of: "_", with: " ").capitalized, icon: "book") }
+                        }
                     }
                     if !metadata.genres.isEmpty {
                         Text(metadata.genres.joined(separator: " · "))
@@ -942,6 +957,20 @@ struct DetailView: View {
                             .foregroundStyle(.white.opacity(0.58))
                             .lineLimit(2)
                     }
+                    if let studios = metadata.studios, !studios.isEmpty {
+                        Text("Studio · \(studios.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.58))
+                            .lineLimit(2)
+                    }
+                } else if media.kind == .anime && isLoadingAnimeMetadata {
+                    ProgressView("Loading AniList details…")
+                        .font(.caption)
+                        .tint(frostOrange)
+                } else if media.kind == .anime {
+                    Text("No additional AniList details are available for this title.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.58))
                 }
                 VStack(alignment: .leading, spacing: 9) {
                     HStack(spacing: 8) {
@@ -993,7 +1022,9 @@ struct DetailView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Choose source")
                 }
-                if media.kind == .tv || media.kind == .anime { EpisodePanel(media: media, seasons: $seasons, selectedSeason: $selectedSeason, selectedEpisode: $selectedEpisode, isLoading: $isLoadingEpisodes) }
+                if media.kind == .tv || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() != "MOVIE") {
+                    EpisodePanel(media: media, seasons: $seasons, selectedSeason: $selectedSeason, selectedEpisode: $selectedEpisode, isLoading: $isLoadingEpisodes)
+                }
                 Text(media.overview.isEmpty ? "No synopsis is available for this title yet." : media.overview).foregroundStyle(.secondary)
                 Text(media.providerNames.isEmpty ? "Source availability is limited for this title." : "Sources: \(media.providerNames.joined(separator: ", "))").font(.caption).foregroundStyle(media.providerNames.isEmpty ? .orange : frostOrange)
             }
@@ -1010,7 +1041,9 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
         .task(id: media.id) {
+            isLoadingAnimeMetadata = media.kind == .anime
             refreshedAnimeMetadata = await store.animeMetadata(for: media)
+            isLoadingAnimeMetadata = false
         }
         .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
     }
@@ -1037,14 +1070,37 @@ struct EpisodePanel: View {
     @Binding var selectedSeason: Int
     @Binding var selectedEpisode: Int
     @Binding var isLoading: Bool
+    @State private var streamURLs: [Int: URL] = [:]
+    @State private var isLoadingStreams = false
+    @State private var streamError: String?
 
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
     private var episodes: [EpisodeInfo] {
         guard let currentSeason else { return [] }
-        if !currentSeason.episodes.isEmpty { return currentSeason.episodes }
-        return (1...max(currentSeason.episodeCount, 1)).map {
-            EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil)
+        let catalogEpisodes = currentSeason.episodes.isEmpty
+            ? (1...max(currentSeason.episodeCount, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil) }
+            : currentSeason.episodes
+        return catalogEpisodes.map { episode in
+            var updated = episode
+            updated.playbackURL = streamURLs[episode.number] ?? episode.playbackURL
+            return updated
         }
+    }
+
+    private func loadAnimeStreams() async {
+        guard media.kind == .anime else { return }
+        isLoadingStreams = true
+        streamError = nil
+        do {
+            let streams = try await store.animePlaybackEpisodes(for: media)
+            streamURLs = Dictionary(streams.compactMap { episode in
+                episode.playbackURL.map { (episode.number, $0) }
+            }, uniquingKeysWith: { first, _ in first })
+            if streamURLs.isEmpty { streamError = "No matching MegaPlay streams were found." }
+        } catch {
+            streamError = "MegaPlay streams could not be resolved. Try again later."
+        }
+        isLoadingStreams = false
     }
 
     var body: some View {
@@ -1052,8 +1108,19 @@ struct EpisodePanel: View {
             HStack {
                 Text("Episodes").font(.headline).foregroundStyle(.white)
                 Spacer()
-                if isLoading { ProgressView().tint(frostOrange) }
+                if isLoading || isLoadingStreams { ProgressView().tint(frostOrange) }
                 else { Text("S\(selectedSeason) · \(episodes.count) episodes").font(.caption).foregroundStyle(.secondary) }
+            }
+            if media.kind == .anime && isLoadingStreams {
+                Text("Finding MegaPlay streams…").font(.caption).foregroundStyle(.secondary)
+            } else if media.kind == .anime, let streamError {
+                HStack(spacing: 8) {
+                    Text(streamError).font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Retry") { Task { await loadAnimeStreams() } }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(frostOrange)
+                }
             }
             if seasons.count > 1 {
                 Picker("Season", selection: $selectedSeason) {
@@ -1077,7 +1144,7 @@ struct EpisodePanel: View {
                     }
                     Text("Episode \(selected.number) · \(selected.name)").font(.subheadline.bold()).foregroundStyle(.white)
                     Text(selected.overview.isEmpty ? "No episode-specific details are published by AniList for this title." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
-                    if media.kind == .anime && selected.playbackURL == nil {
+                    if media.kind == .anime && selected.playbackURL == nil && !isLoadingStreams {
                         Label("MegaPlay stream unavailable", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.orange)
@@ -1127,11 +1194,25 @@ struct EpisodePanel: View {
         .padding(14)
         .background(frostPanel)
         .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
-        .task {
+        .task(id: media.id) {
             isLoading = true
             seasons = await store.episodeCatalog(for: media)
             if let first = seasons.first, !seasons.contains(where: { $0.season == selectedSeason }) { selectedSeason = first.season }
             isLoading = false
+
+            guard media.kind == .anime, !seasons.isEmpty else { return }
+            isLoadingStreams = true
+            streamError = nil
+            do {
+                let streams = try await store.animePlaybackEpisodes(for: media)
+                streamURLs = Dictionary(streams.compactMap { episode in
+                    episode.playbackURL.map { (episode.number, $0) }
+                }, uniquingKeysWith: { first, _ in first })
+                if streamURLs.isEmpty { streamError = "No matching MegaPlay streams were found." }
+            } catch {
+                streamError = "MegaPlay streams could not be resolved. Try again later."
+            }
+            isLoadingStreams = false
         }
     }
 }

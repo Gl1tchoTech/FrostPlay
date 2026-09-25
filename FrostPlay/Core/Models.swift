@@ -18,6 +18,35 @@ struct MediaMetadata: Codable, Hashable {
     let score: Int?
     let status: String?
     let format: String?
+    let countryOfOrigin: String?
+    let durationMinutes: Int?
+    let source: String?
+    let studios: [String]?
+
+    var hasDetails: Bool {
+        !genres.isEmpty || score != nil || status != nil || format != nil || countryOfOrigin != nil ||
+        durationMinutes != nil || source != nil || !(studios ?? []).isEmpty
+    }
+
+    init(
+        genres: [String],
+        score: Int?,
+        status: String?,
+        format: String?,
+        countryOfOrigin: String? = nil,
+        durationMinutes: Int? = nil,
+        source: String? = nil,
+        studios: [String]? = nil
+    ) {
+        self.genres = genres
+        self.score = score
+        self.status = status
+        self.format = format
+        self.countryOfOrigin = countryOfOrigin
+        self.durationMinutes = durationMinutes
+        self.source = source
+        self.studios = studios
+    }
 }
 
 struct MediaItem: Identifiable, Codable, Hashable {

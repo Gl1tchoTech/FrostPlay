@@ -132,7 +132,24 @@ final class FrostPlayStore: ObservableObject {
 
     func animeMetadata(for media: MediaItem) async -> MediaMetadata? {
         guard media.kind == .anime, let aniListID = media.aniListID else { return media.metadata }
-        return (try? await anilist.metadata(for: aniListID)) ?? media.metadata
+        guard let refreshed = try? await anilist.metadata(for: aniListID), refreshed.hasDetails else {
+            return media.metadata
+        }
+        guard let existing = media.metadata else { return refreshed }
+        return MediaMetadata(
+            genres: refreshed.genres.isEmpty ? existing.genres : refreshed.genres,
+            score: refreshed.score ?? existing.score,
+            status: refreshed.status ?? existing.status,
+            format: refreshed.format ?? existing.format,
+            countryOfOrigin: refreshed.countryOfOrigin ?? existing.countryOfOrigin,
+            durationMinutes: refreshed.durationMinutes ?? existing.durationMinutes,
+            source: refreshed.source ?? existing.source,
+            studios: (refreshed.studios?.isEmpty ?? true) ? existing.studios : refreshed.studios
+        )
+    }
+
+    func animePlaybackEpisodes(for media: MediaItem) async throws -> [EpisodeInfo] {
+        try await anilist.playbackEpisodes(for: media, language: settings.preferredAnimeLanguage)
     }
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
@@ -143,7 +160,7 @@ final class FrostPlayStore: ObservableObject {
                 return []
             }
             do {
-                let episodes = try await anilist.episodes(for: media, language: settings.preferredAnimeLanguage)
+                let episodes = try await anilist.episodes(for: media)
                 let count = media.episodeCount ?? episodes.count
                 guard count > 0 || !episodes.isEmpty else {
                     episodeError = "AniList returned no episode information for this title."
