@@ -576,241 +576,6 @@ struct SettingsRow: View {
     }
 }
 
-struct AppearanceSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        Form {
-            Section("Display") {
-                Picker("Theme", selection: $store.settings.theme) {
-                    Text("Dark").tag(AppTheme.dark)
-                    Text("Light").tag(AppTheme.light)
-                    Text("System").tag(AppTheme.system)
-                }
-                Toggle("Image logos", isOn: $store.settings.showImageLogos)
-                Toggle("Backdrop artwork", isOn: $store.settings.backdropTrailers)
-                Toggle("Reduce motion", isOn: $store.settings.reduceMotion)
-                Toggle("Auto-hide navigation", isOn: $store.settings.autoHideHeader)
-            }
-            Section("Text") {
-                SliderRow(title: "Text size", value: $store.settings.textScale, range: 0.85...1.25, suffix: "\(Int(store.settings.textScale * 100))%")
-                Toggle("Bold text", isOn: $store.settings.boldText)
-                Text("System Dynamic Type remains supported throughout the app.").font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("Artwork") {
-                SliderRow(title: "Background opacity", value: $store.settings.backgroundOpacity, range: 0...0.8, suffix: "\(Int(store.settings.backgroundOpacity * 100))%")
-                SliderRow(title: "Background blur", value: $store.settings.backgroundBlur, range: 0...32, suffix: "\(Int(store.settings.backgroundBlur))")
-                SliderRow(title: "Line spacing", value: $store.settings.lineSpacing, range: 1...2, suffix: "\(Int(store.settings.lineSpacing * 100))%")
-            }
-            .listRowBackground(frostPanel)
-        }
-        .navigationTitle("Appearance")
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-    }
-}
-
-struct PlaybackSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        Form {
-            Section("Playback") {
-                Picker("Preferred quality", selection: $store.settings.preferredQuality) { Text("Auto").tag("Auto"); Text("1080p").tag("1080p"); Text("720p").tag("720p") }
-                Toggle("Autoplay next episode", isOn: $store.settings.autoplayNextEpisode)
-                Toggle("Auto skip intro", isOn: $store.settings.autoSkipIntro)
-                Toggle("Auto subtitles", isOn: $store.settings.autoSubtitles)
-                Toggle("Allow direct-file downloads", isOn: $store.settings.downloadsEnabled)
-            }
-            Section("Anime") { Picker("Preferred language", selection: $store.settings.preferredAnimeLanguage) { Text("Sub").tag("sub"); Text("Dub").tag("dub") } }
-        }
-        .navigationTitle("Playback")
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-    }
-}
-
-struct SubtitleSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        Form {
-            Section { Text("The quick brown fox").font(.title3.weight(store.settings.boldText ? .bold : .regular)).foregroundStyle(subtitleColor).frame(maxWidth: .infinity).padding(28).background(Color.black).clipShape(RoundedRectangle(cornerRadius: 16)) }
-            Section("Subtitles") { Toggle("Use native player", isOn: $store.settings.subtitleUseNativePlayer) }
-            Section("Color") { Picker("Color", selection: $store.settings.subtitleColor) { Text("White").tag("white"); Text("Yellow").tag("yellow"); Text("Cyan").tag("cyan"); Text("Green").tag("green") }.pickerStyle(.segmented) }
-            Section("Text size") { Slider(value: $store.settings.textScale, in: 0.85...1.5).tint(frostOrange) }
-        }
-        .navigationTitle("Subtitles")
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-    }
-    private var subtitleColor: Color { store.settings.subtitleColor == "yellow" ? .yellow : store.settings.subtitleColor == "cyan" ? .cyan : store.settings.subtitleColor == "green" ? .green : .white }
-}
-
-struct CatalogSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        Form {
-            Section("TMDB") {
-                SecureField("TMDB API key", text: $store.settings.tmdbAPIKey).textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.password)
-                Label(store.isTMDBConfigured ? "Connected" : "Not connected", systemImage: store.isTMDBConfigured ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(store.isTMDBConfigured ? .green : .orange)
-                Text("Stored locally on this device. Changes apply to the next search or catalog refresh.").font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-        .navigationTitle("Catalog & API")
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-    }
-}
-
-struct HomeSectionsSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        List {
-            Section("Visible sections") {
-                ForEach(HomeSection.allCases) { section in
-                    Toggle(section.title, isOn: Binding(get: { store.settings.homeSections.contains(section) }, set: { enabled in
-                        if enabled {
-                            if !store.settings.homeSections.contains(section) { store.settings.homeSections.append(section) }
-                        } else {
-                            store.settings.homeSections.removeAll { $0 == section }
-                        }
-                    }))
-                }
-                Text("Use Edit to drag sections into the order you want on Home.").font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("Order") {
-                ForEach(store.settings.homeSections) { section in
-                    Label(section.title, systemImage: "line.3.horizontal")
-                }
-                .onMove(perform: store.moveHomeSection)
-            }
-        }
-        .navigationTitle("Home sections")
-        .toolbar { EditButton() }
-    }
-}
-
-struct SourceSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    var body: some View {
-        Form {
-            Section("Enabled sources") {
-                ForEach(PlaybackSource.implemented) { source in
-                    Toggle(source.rawValue, isOn: Binding(
-                        get: { store.settings.enabledSources.contains(source) },
-                        set: { store.setSource(source, enabled: $0) }
-                    ))
-                }
-                Text("Unavailable sources are not silently used. A warning badge appears when a title has no verified source.").font(.footnote).foregroundStyle(.secondary)
-                Text("Tap Edit, then drag sources to change their priority.").font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("Priority") {
-                ForEach(store.settings.enabledSources) { source in
-                    Label(source.rawValue, systemImage: source == .megaPlay ? "sparkles" : "play.rectangle.fill")
-                }
-                .onMove(perform: store.moveSource)
-            }
-        }
-        .navigationTitle("Sources")
-        .toolbar { EditButton() }
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-    }
-}
-
-struct CacheSettingsView: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    @State private var showingClearConfirmation = false
-    @State private var showingClearedConfirmation = false
-    @State private var isClearing = false
-
-    private var totalBytes: Int { store.cacheBreakdown.values.reduce(0, +) }
-
-    var body: some View {
-        List {
-            Section {
-                HStack {
-                    Label("Total cached", systemImage: "internaldrive")
-                    Spacer()
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                ForEach(CacheCategory.allCases) { category in
-                    HStack {
-                        Text(category.rawValue)
-                        Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(store.cacheBreakdown[category] ?? 0), countStyle: .file))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                }
-            } header: {
-                Text("Storage")
-            } footer: {
-                Text("Sizes are approximate. Your saved list, watch history, downloads, and settings are kept when cache is cleared.")
-            }
-
-            Section {
-                Button(role: .destructive) {
-                    showingClearConfirmation = true
-                } label: {
-                    HStack {
-                        Spacer()
-                        if isClearing { ProgressView() }
-                        else { Label("Clear all cache", systemImage: "trash") }
-                        Spacer()
-                    }
-                }
-                .disabled(isClearing)
-            } footer: {
-                Text("Clears URL/image cache, WebKit data, temporary files, and the anime catalog cache.")
-            }
-        }
-        .navigationTitle("Cache")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await store.refreshCacheBreakdown() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .accessibilityLabel("Refresh cache sizes")
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .background(frostBackground)
-        .task { await store.refreshCacheBreakdown() }
-        .confirmationDialog("Clear all cached data?", isPresented: $showingClearConfirmation, titleVisibility: .visible) {
-            Button("Clear cache", role: .destructive) {
-                Task {
-                    isClearing = true
-                    await store.clearAllCache()
-                    isClearing = false
-                    showingClearedConfirmation = true
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes temporary cached data. Your library, history, downloads, and settings will remain.")
-        }
-        .alert("Cache cleared", isPresented: $showingClearedConfirmation) {
-            Button("Close app", role: .destructive) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { exit(EXIT_SUCCESS) }
-            }
-            Button("Keep using FrostPlay", role: .cancel) {}
-        } message: {
-            Text("FrostPlay will close. Reopen it to start with a fresh cache.")
-        }
-    }
-}
-
-struct SliderRow: View {
-    let title: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let suffix: String
-    var body: some View { VStack(alignment: .leading, spacing: 6) { HStack { Text(title); Spacer(); Text(suffix).foregroundStyle(.secondary) }; Slider(value: $value, in: range).tint(frostOrange) } }
-}
-
 struct MediaRow: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
@@ -932,7 +697,11 @@ struct DetailView: View {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
                 }
-                if media.kind == .anime,
+                if media.kind == .anime, isLoadingAnimeMetadata, (refreshedAnimeMetadata ?? media.metadata)?.hasDetails != true {
+                    ProgressView("Loading AniList details…")
+                        .font(.caption)
+                        .tint(frostOrange)
+                } else if media.kind == .anime,
                    let metadata = refreshedAnimeMetadata ?? media.metadata,
                    metadata.hasDetails {
                     if metadata.format != nil || metadata.score != nil || metadata.status != nil {
@@ -963,10 +732,6 @@ struct DetailView: View {
                             .foregroundStyle(.white.opacity(0.58))
                             .lineLimit(2)
                     }
-                } else if media.kind == .anime && isLoadingAnimeMetadata {
-                    ProgressView("Loading AniList details…")
-                        .font(.caption)
-                        .tint(frostOrange)
                 } else if media.kind == .anime {
                     Text("No additional AniList details are available for this title.")
                         .font(.caption)
@@ -989,7 +754,7 @@ struct DetailView: View {
                         }
                         .buttonStyle(.plain)
 
-                        if media.kind == .movie {
+                        if media.kind == .movie || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() == "MOVIE") {
                             NavigationLink {
                                 PlayerView(media: media)
                             } label: {
@@ -1041,7 +806,8 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
         .task(id: media.id) {
-            isLoadingAnimeMetadata = media.kind == .anime
+            guard media.kind == .anime else { return }
+            isLoadingAnimeMetadata = true
             refreshedAnimeMetadata = await store.animeMetadata(for: media)
             isLoadingAnimeMetadata = false
         }
@@ -1087,16 +853,22 @@ struct EpisodePanel: View {
         }
     }
 
-    private func loadAnimeStreams() async {
+    private func loadAnimeStreams() async { // resolves MegaPlay URLs for anime episodes
         guard media.kind == .anime else { return }
+        let numbers = episodes.map(\.number)
+        guard !numbers.isEmpty else {
+            streamURLs = [:]
+            streamError = "This title has no episode list, so there are no streams to resolve."
+            return
+        }
         isLoadingStreams = true
         streamError = nil
         do {
-            let streams = try await store.animePlaybackEpisodes(for: media)
+            let streams = try await store.animePlaybackEpisodes(for: media, episodeNumbers: numbers)
             streamURLs = Dictionary(streams.compactMap { episode in
                 episode.playbackURL.map { (episode.number, $0) }
             }, uniquingKeysWith: { first, _ in first })
-            if streamURLs.isEmpty { streamError = "No matching MegaPlay streams were found." }
+            if streamURLs.isEmpty { streamError = "MegaPlay has no mapped stream for this title yet." }
         } catch {
             streamError = "MegaPlay streams could not be resolved. Try again later."
         }
@@ -1195,24 +967,19 @@ struct EpisodePanel: View {
         .background(frostPanel)
         .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
         .task(id: media.id) {
+            streamURLs = [:]
+            streamError = nil
             isLoading = true
             seasons = await store.episodeCatalog(for: media)
             if let first = seasons.first, !seasons.contains(where: { $0.season == selectedSeason }) { selectedSeason = first.season }
             isLoading = false
 
             guard media.kind == .anime, !seasons.isEmpty else { return }
-            isLoadingStreams = true
-            streamError = nil
-            do {
-                let streams = try await store.animePlaybackEpisodes(for: media)
-                streamURLs = Dictionary(streams.compactMap { episode in
-                    episode.playbackURL.map { (episode.number, $0) }
-                }, uniquingKeysWith: { first, _ in first })
-                if streamURLs.isEmpty { streamError = "No matching MegaPlay streams were found." }
-            } catch {
-                streamError = "MegaPlay streams could not be resolved. Try again later."
-            }
-            isLoadingStreams = false
+            await loadAnimeStreams()
+        }
+        .onChange(of: store.settings.preferredAnimeLanguage) { _, _ in
+            guard media.kind == .anime else { return }
+            Task { await loadAnimeStreams() }
         }
     }
 }
@@ -1221,26 +988,44 @@ struct SourcePickerView: View {
     @EnvironmentObject private var store: FrostPlayStore
     let media: MediaItem
     @Environment(\.dismiss) private var dismiss
+
+    private var compatibleSources: [PlaybackSource] {
+        PlaybackSource.implemented.filter { $0.supports.contains(media.kind) }
+    }
+    private var selectedSource: PlaybackSource { store.settings.defaultSource(for: media.kind) }
+    private var kindLabel: String { media.kind == .anime ? "anime" : "movies & TV" }
+
     var body: some View {
         NavigationStack {
             List {
-                Section("Available sources") {
-                    ForEach(PlaybackSource.implemented.filter { $0.supports.contains(media.kind) }) { source in
-                        Button { dismiss() } label: {
-                            HStack {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                VStack(alignment: .leading) {
+                Section {
+                    ForEach(compatibleSources) { source in
+                        Button {
+                            store.setDefaultSource(source, for: media.kind)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: source == selectedSource ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(source == selectedSource ? .green : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text(source.rawValue).foregroundStyle(.primary)
-                                    Text("Compatible with this title type").font(.caption).foregroundStyle(.secondary)
+                                    Text(source == selectedSource ? "Current default for \(kindLabel)" : "Use for \(kindLabel)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Text("Use").foregroundStyle(frostOrange)
                             }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                     }
-                    if PlaybackSource.implemented.filter({ $0.supports.contains(media.kind) }).isEmpty {
-                        Text("No verified source is available for this title.").foregroundStyle(.secondary)
+                    if compatibleSources.isEmpty {
+                        Text("No verified source is available for this title type.").foregroundStyle(.secondary)
                     }
+                } header: {
+                    Text("Available sources")
+                } footer: {
+                    Text("Selecting a source makes it the default for \(kindLabel) titles, and this title starts playing with it right away.")
                 }
             }
             .navigationTitle("Sources")
@@ -1259,6 +1044,9 @@ struct PlayerView: View {
     let preferredPlaybackURL: URL?
     @State private var showingSourcePicker = false
     private let resolver = PlaybackResolver()
+    private var resolvedPlayback: ResolvedPlayback? {
+        resolver.resolveSource(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredPlaybackURL)
+    }
     init(media: MediaItem, season: Int = 1, episode: Int = 1, preferredPlaybackURL: URL? = nil) {
         self.media = media
         self.season = season
@@ -1279,7 +1067,7 @@ struct PlayerView: View {
                 .buttonStyle(.plain)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1)
-                    Text("FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
+                    Text(resolvedPlayback?.source.rawValue.uppercased() ?? "FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
                 }
                 Spacer()
                 Button("Source") { showingSourcePicker = true }.font(.caption.bold()).buttonStyle(.bordered)
@@ -1302,7 +1090,7 @@ struct PlayerView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }
-            } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Choose another source or verify this title's IDs.")) }
+            } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Pick a different source for this title type.")) }
         }
         .background(Color.black)
         .ignoresSafeArea()

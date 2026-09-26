@@ -134,6 +134,19 @@ enum PlaybackSource: String, Codable, CaseIterable, Identifiable, Hashable {
         default: return []
         }
     }
+
+    /// The sources that are legal for a title type. MegaPlay is anime-only and the
+    /// TMDB embeds are movie/TV-only, so a title can never be routed to a source
+    /// that does not support it (a TMDB title can never attempt MegaPlay).
+    static func allowed(for kind: MediaKind) -> Set<PlaybackSource> {
+        Set(implemented.filter { $0.supports.contains(kind) })
+    }
+
+    /// The built-in default when the user has not chosen one or their choice is
+    /// incompatible with the title type.
+    static func builtInDefault(for kind: MediaKind) -> PlaybackSource {
+        kind == .anime ? .megaPlay : .vidLink
+    }
 }
 
 enum AppTheme: String, Codable, CaseIterable, Identifiable {
@@ -151,6 +164,10 @@ struct FrostPlaySettings: Codable {
     var tmdbReadAccessToken = ""
     var theme: AppTheme = .dark
     var enabledSources: [PlaybackSource] = PlaybackSource.implemented
+    // Separate defaults because anime is addressed by AniList/MAL ID while movies
+    // and TV are addressed by TMDB ID; one source cannot serve both.
+    var defaultAnimeSource: PlaybackSource = .megaPlay
+    var defaultMovieTVSource: PlaybackSource = .vidLink
     var preferredAnimeLanguage = "sub"
     var selectedProvider: String?
     var textScale = 1.0
@@ -172,7 +189,15 @@ struct FrostPlaySettings: Codable {
     var downloadsEnabled = true
 
     enum CodingKeys: String, CodingKey {
-        case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
+        case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, defaultAnimeSource, defaultMovieTVSource, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
+    }
+
+    /// The source that should be tried first for a title type, always guaranteed to
+    /// be compatible with that type.
+    func defaultSource(for kind: MediaKind) -> PlaybackSource {
+        let candidate = kind == .anime ? defaultAnimeSource : defaultMovieTVSource
+        if PlaybackSource.allowed(for: kind).contains(candidate) { return candidate }
+        return PlaybackSource.builtInDefault(for: kind)
     }
 
     init() {}
@@ -184,6 +209,8 @@ struct FrostPlaySettings: Codable {
         tmdbReadAccessToken = try container.decodeIfPresent(String.self, forKey: .tmdbReadAccessToken) ?? defaults.tmdbReadAccessToken
         theme = try container.decodeIfPresent(AppTheme.self, forKey: .theme) ?? defaults.theme
         enabledSources = try container.decodeIfPresent([PlaybackSource].self, forKey: .enabledSources) ?? defaults.enabledSources
+        defaultAnimeSource = try container.decodeIfPresent(PlaybackSource.self, forKey: .defaultAnimeSource) ?? defaults.defaultAnimeSource
+        defaultMovieTVSource = try container.decodeIfPresent(PlaybackSource.self, forKey: .defaultMovieTVSource) ?? defaults.defaultMovieTVSource
         preferredAnimeLanguage = try container.decodeIfPresent(String.self, forKey: .preferredAnimeLanguage) ?? defaults.preferredAnimeLanguage
         selectedProvider = try container.decodeIfPresent(String.self, forKey: .selectedProvider)
         textScale = try container.decodeIfPresent(Double.self, forKey: .textScale) ?? defaults.textScale

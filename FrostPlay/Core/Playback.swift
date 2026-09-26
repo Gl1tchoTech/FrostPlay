@@ -3,25 +3,69 @@ import AVKit
 import SwiftUI
 import WebKit
 
+struct ResolvedPlayback {
+    let source: PlaybackSource
+    let format: PlaybackFormat
+}
+
 struct PlaybackResolver {
     private let adapters: [PlaybackSourceAdapter] = [VidLinkAdapter(), MegaPlayAdapter(), MoviesAPIAdapter()]
 
-    func resolve(media: MediaItem, settings: FrostPlaySettings, season: Int? = 1, episode: Int? = 1, preferredURL: URL? = nil) -> PlaybackFormat? {
+    /// Resolves a playable format, returning the source that produced it so the UI
+    /// can show what is actually playing.
+    func resolveSource(
+        media: MediaItem,
+        settings: FrostPlaySettings,
+        season: Int? = 1,
+        episode: Int? = 1,
+        preferredURL: URL? = nil,
+        forcedSource: PlaybackSource? = nil
+    ) -> ResolvedPlayback? {
+        // Sources are strictly keyed to the title type: anime -> MegaPlay,
+        // movies/TV -> VidLink/MoviesAPI. A TMDB title can never attempt MegaPlay.
+        let allowed = PlaybackSource.allowed(for: media.kind)
+        guard !allowed.isEmpty else { return nil }
+
+        // A prefilled MegaPlay URL is only trusted for anime titles.
         if media.kind == .anime,
            media.tmdbID == nil,
            let preferredURL = MegaPlayURL.validated(preferredURL) {
-            return .embed(preferredURL)
+            return ResolvedPlayback(source: .megaPlay, format: .embed(preferredURL))
         }
-        let allowed: Set<PlaybackSource> = media.kind == .anime ? [.megaPlay] : [.vidLink, .moviesAPI]
-        let orderedSources = settings.enabledSources.filter { allowed.contains($0) }
-        for source in orderedSources {
-            guard source.supports.contains(media.kind) else { continue }
+
+        // The user's default source for this title type is always tried first,
+        // then the remaining enabled sources in their saved order.
+        let preferred: PlaybackSource?
+        if let forcedSource, allowed.contains(forcedSource) {
+            preferred = forcedSource
+        } else {
+            preferred = settings.defaultSource(for: media.kind)
+        }
+        var ordered = settings.enabledSources.filter { allowed.contains($0) }
+        if let preferred {
+            ordered.removeAll { $0 == preferred }
+            ordered.insert(preferred, at: 0)
+        }
+
+        for source in ordered {
+            guard allowed.contains(source), source.supports.contains(media.kind) else { continue }
             guard let adapter = adapters.first(where: { $0.source == source }) else { continue }
             if let result = adapter.playback(for: media, season: season, episode: episode, language: settings.preferredAnimeLanguage) {
-                return result
+                return ResolvedPlayback(source: source, format: result)
             }
         }
         return nil
+    }
+
+    func resolve(
+        media: MediaItem,
+        settings: FrostPlaySettings,
+        season: Int? = 1,
+        episode: Int? = 1,
+        preferredURL: URL? = nil,
+        forcedSource: PlaybackSource? = nil
+    ) -> PlaybackFormat? {
+        resolveSource(media: media, settings: settings, season: season, episode: episode, preferredURL: preferredURL, forcedSource: forcedSource)?.format
     }
 }
 

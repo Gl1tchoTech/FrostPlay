@@ -175,6 +175,28 @@ enum MegaPlayURL {
     }
 }
 
+/// Builds the documented MegaPlay embed URLs FrostPlay plays anime with.
+///
+/// MegaPlay publishes three embed routes: a catalog/episode-id route
+/// (`/stream/s-2/{embed-id}/{language}`) plus AniList- and MAL-addressed routes.
+/// FrostPlay addresses MegaPlay with the AniList ID first and the MAL ID second,
+/// so playback is derived straight from the IDs AniList already gave us instead
+/// of resolving Anikoto's internal catalog ID out of its bounded "recent" feed.
+/// See https://megaplay.buzz/api.
+enum MegaPlayEmbed {
+    static func url(media: MediaItem, episode: Int, language: String) -> URL? {
+        let languagePath = language.lowercased() == "dub" ? "dub" : "sub"
+        let number = max(episode, 1)
+        if let aniListID = media.aniListID {
+            return MegaPlayURL.validated("https://megaplay.buzz/stream/ani/\(aniListID)/\(number)/\(languagePath)")
+        }
+        if let malID = media.malID {
+            return MegaPlayURL.validated("https://megaplay.buzz/stream/mal/\(malID)/\(number)/\(languagePath)")
+        }
+        return nil
+    }
+}
+
 fileprivate struct AnimeStreamEpisode {
     let number: Int
     let playbackURL: URL?
@@ -225,8 +247,9 @@ struct AnikotoService {
         let preferredLanguage = language.lowercased() == "dub" ? "dub" : "sub"
         return series.episodes.compactMap { episode in
             guard let number = episode.number else { return nil }
-            // The API's embed_url is authoritative. Do not manufacture a MegaPlay URL
-            // from AniList IDs: MegaPlay requires Anikoto's episode embed ID.
+            // Last-resort path for titles with no AniList/MAL ID. FrostPlay normally
+            // addresses MegaPlay directly by ID (see MegaPlayEmbed), so Anikoto's
+            // catalog embed id is only needed when neither external ID is known.
             let languageURL = preferredLanguage == "dub"
                 ? (episode.embedURL?.dub ?? episode.embedURL?.sub)
                 : (episode.embedURL?.sub ?? episode.embedURL?.dub)
@@ -245,9 +268,11 @@ struct AnikotoService {
             media.title.replacingOccurrences(of: "&amp;", with: "&")
         ].map(normalized))
         // The endpoint caps per_page at 100. Recent titles are near the front, while
-        // older catalog entries can be many pages deep. Cache pages per app session and
-        // throttle all Anikoto requests to remain under its published request limit.
-        let providerPage = 1...55
+        // older catalog entries can be many pages deep. This is only a last-resort
+        // fallback for titles with no AniList/MAL ID, so keep it tightly bounded.
+        // Cache pages per app session and throttle all Anikoto requests to remain
+        // under its published request limit.
+        let providerPage = 1...10
         for page in providerPage {
             if Task.isCancelled { throw CancellationError() }
             let response = try await fetchRecent(page: page, perPage: 100)
@@ -277,7 +302,7 @@ struct AnikotoService {
             if response.data.isEmpty { break }
             // Continue through its reported pages, but keep stream lookup bounded.
             let total = response.pagination?.total ?? response.data.count
-            let pageCount = min((total + 99) / 100, 55)
+            let pageCount = min((total + 99) / 100, 10)
             if page >= pageCount { break }
         }
         throw FrostPlayServiceError.invalidResponse
@@ -456,6 +481,14 @@ private struct FlexibleInt: Decodable {
     }
 }
 
+private actor AniListEpisodeCache {
+    static let shared = AniListEpisodeCache()
+    private var rowsByAnimeID: [Int: [EpisodeInfo]] = [:]
+
+    func rows(for aniListID: Int) -> [EpisodeInfo]? { rowsByAnimeID[aniListID] }
+    func store(_ value: [EpisodeInfo], for aniListID: Int) { rowsByAnimeID[aniListID] = value }
+}
+
 struct AniListService: MetadataService {
 
     let session: URLSession = .shared
@@ -497,16 +530,24 @@ struct AniListService: MetadataService {
     func episodes(for media: MediaItem) async throws -> [EpisodeInfo] {
         guard media.kind == .anime, let aniListID = media.aniListID else { return [] }
 
-        // AniList does not reliably publish streamingEpisodes. The count is enough
-        // to show a stable catalog while playback URLs are resolved separately.
-        if let episodeCount = media.episodeCount, episodeCount > 0 {
-            return makeEpisodeRows(count: episodeCount)
+        // The detail screen resolves the catalog and then the playback URLs for the
+        // same title. Reuse one AniList response so that stays a single request.
+        if let cached = await AniListEpisodeCache.shared.rows(for: aniListID) {
+            return cached
         }
 
+        // Always ask AniList for the authoritative episode data. The count cached in
+        // the search result is only a hint: `episodes` is null for long-running and
+        // still-airing titles (One Piece, Detective Conan, ...), which previously
+        // produced an empty episode list. `nextAiringEpisode` and `streamingEpisodes`
+        // fill those cases, and published streaming titles/artwork enrich the rows we
+        // can map without fabricating the rest.
         let queryText = """
         query ($id: Int) {
           Media(id: $id, type: ANIME) {
             episodes
+            nextAiringEpisode { episode }
+            streamingEpisodes { title thumbnail }
           }
         }
         """
@@ -516,43 +557,94 @@ struct AniListService: MetadataService {
         ])
         request.timeoutInterval = 20
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
-            throw FrostPlayServiceError.invalidResponse
-        }
-        let payload: AniListEpisodesResponse
         do {
-            payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+                throw FrostPlayServiceError.invalidResponse
+            }
+            let payload = try JSONDecoder().decode(AniListEpisodesResponse.self, from: data)
+            guard let aniListMedia = payload.data?.media else {
+                throw FrostPlayServiceError.decodingFailed
+            }
+            let rows = makeEpisodeRows(
+                count: resolvedEpisodeCount(
+                    episodes: aniListMedia.episodes,
+                    nextAiringEpisode: aniListMedia.nextAiringEpisode?.episode,
+                    streamingEpisodeCount: aniListMedia.streamingEpisodes?.count ?? 0,
+                    fallback: media.episodeCount
+                ),
+                streamingEpisodes: aniListMedia.streamingEpisodes ?? []
+            )
+            await AniListEpisodeCache.shared.store(rows, for: aniListID)
+            return rows
         } catch {
-            throw FrostPlayServiceError.decodingFailed
+            // Stay usable when AniList is unreachable but the search response already
+            // carried an episode count.
+            if let fallback = media.episodeCount, fallback > 0 {
+                return makeEpisodeRows(count: fallback)
+            }
+            throw error
         }
-        guard let aniListMedia = payload.data?.media else {
-            throw FrostPlayServiceError.decodingFailed
-        }
-
-        // AniList does not consistently publish episode-level titles, artwork, or
-        // synopses. Use its episode count and avoid fabricating episode metadata.
-        guard let episodeCount = aniListMedia.episodes ?? media.episodeCount, episodeCount > 0 else {
-            return []
-        }
-        return makeEpisodeRows(count: episodeCount)
     }
 
-    private func makeEpisodeRows(count: Int) -> [EpisodeInfo] {
-        (1...min(count, 1_000)).map { number in
-            EpisodeInfo(
+    private func resolvedEpisodeCount(episodes: Int?, nextAiringEpisode: Int?, streamingEpisodeCount: Int, fallback: Int?) -> Int {
+        if let episodes, episodes > 0 { return episodes }
+        if let nextAiringEpisode, nextAiringEpisode > 1 { return nextAiringEpisode - 1 }
+        if streamingEpisodeCount > 0 { return streamingEpisodeCount }
+        if let fallback, fallback > 0 { return fallback }
+        return 0
+    }
+
+    private func makeEpisodeRows(
+        count: Int,
+        streamingEpisodes: [AniListEpisodesResponse.Media.StreamingEpisode] = []
+    ) -> [EpisodeInfo] {
+        guard count > 0 else { return [] }
+        // AniList only publishes titles/artwork for a subset of episodes and its
+        // titles sometimes carry no episode number. Parse the number when present
+        // and otherwise fall back to the entry's position in the ordered list, so
+        // real titles and thumbnails reach the episode rows we already show.
+        var details: [Int: AniListEpisodesResponse.Media.StreamingEpisode] = [:]
+        for (index, episode) in streamingEpisodes.enumerated() {
+            let parsed = episodeNumber(from: episode.title, fallback: 0)
+            let number = parsed > 0 ? parsed : index + 1
+            if details[number] == nil { details[number] = episode }
+        }
+        return (1...min(count, 2_000)).map { number in
+            let detail = details[number]
+            return EpisodeInfo(
                 number: number,
-                name: "Episode \(number)",
+                name: detail?.title ?? "Episode \(number)",
                 overview: "",
                 airDate: nil,
-                imageURL: nil,
+                imageURL: detail?.thumbnail.flatMap(URL.init),
                 playbackURL: nil
             )
         }
     }
 
-    func playbackEpisodes(for media: MediaItem, language: String = "sub") async throws -> [EpisodeInfo] {
-        let streams = try await AnikotoService().episodes(for: media, language: language)
+    func playbackEpisodes(for media: MediaItem, episodeNumbers: [Int], language: String = "sub") async throws -> [EpisodeInfo] {
+        guard media.kind == .anime else { return [] }
+        let languagePath = language.lowercased() == "dub" ? "dub" : "sub"
+
+        // MegaPlay publishes AniList- and MAL-addressed embed routes, so playable
+        // URLs come straight from the IDs we already hold: no catalog scan, no
+        // dependency on Anikoto's bounded "recent" feed, and no request latency.
+        if media.aniListID != nil || media.malID != nil {
+            return episodeNumbers.map { number in
+                EpisodeInfo(
+                    number: number,
+                    name: "Episode \(number)",
+                    overview: "",
+                    airDate: nil,
+                    imageURL: nil,
+                    playbackURL: MegaPlayEmbed.url(media: media, episode: number, language: languagePath)
+                )
+            }
+        }
+
+        // Last resort for titles with no external ID to address MegaPlay directly.
+        let streams = try await AnikotoService().episodes(for: media, language: languagePath)
         return streams.map { stream in
             EpisodeInfo(
                 number: stream.number,
@@ -723,10 +815,11 @@ struct MegaPlayAdapter: PlaybackSourceAdapter {
     let source = PlaybackSource.megaPlay
 
     func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat? {
-        // MegaPlay URLs are resolved by Anikoto's episode mapping. Never derive a
-        // stream from an AniList ID or let an anime fall through to TMDB sources.
-        guard media.kind == .anime, media.tmdbID == nil, episode != nil else { return nil }
-        return nil
+        // Address MegaPlay with the AniList/MAL ID so every anime resolves,
+        // including films (which have no episode list). Never let anime fall
+        // through to the TMDB-only sources.
+        guard media.kind == .anime, media.tmdbID == nil else { return nil }
+        return MegaPlayEmbed.url(media: media, episode: episode ?? 1, language: language).map(PlaybackFormat.embed)
     }
 }
 
@@ -801,6 +894,17 @@ private struct AniListEpisodesResponse: Decodable {
 
     struct Media: Decodable {
         let episodes: Int?
+        let nextAiringEpisode: NextAiringEpisode?
+        let streamingEpisodes: [StreamingEpisode]?
+
+        struct NextAiringEpisode: Decodable {
+            let episode: Int?
+        }
+
+        struct StreamingEpisode: Decodable {
+            let title: String?
+            let thumbnail: String?
+        }
     }
 }
 

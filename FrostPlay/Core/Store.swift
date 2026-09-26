@@ -55,6 +55,13 @@ final class FrostPlayStore: ObservableObject {
         let missingSources = PlaybackSource.implemented.filter { !restoredSettings.enabledSources.contains($0) }
         restoredSettings.enabledSources.append(contentsOf: missingSources)
         if restoredSettings.enabledSources.isEmpty { restoredSettings.enabledSources = PlaybackSource.implemented }
+        // Keep the per-kind defaults compatible with their title types.
+        if !PlaybackSource.allowed(for: .anime).contains(restoredSettings.defaultAnimeSource) {
+            restoredSettings.defaultAnimeSource = .megaPlay
+        }
+        if !PlaybackSource.allowed(for: .movie).contains(restoredSettings.defaultMovieTVSource) {
+            restoredSettings.defaultMovieTVSource = .vidLink
+        }
         restoredSettings.homeSections = restoredSettings.homeSections.filter { HomeSection.allCases.contains($0) }
         if restoredSettings.homeSections.isEmpty { restoredSettings.homeSections = HomeSection.defaultOrder }
         settings = restoredSettings
@@ -148,8 +155,16 @@ final class FrostPlayStore: ObservableObject {
         )
     }
 
-    func animePlaybackEpisodes(for media: MediaItem) async throws -> [EpisodeInfo] {
-        try await anilist.playbackEpisodes(for: media, language: settings.preferredAnimeLanguage)
+    func animePlaybackEpisodes(for media: MediaItem, episodeNumbers: [Int]? = nil) async throws -> [EpisodeInfo] {
+        let numbers: [Int]
+        if let episodeNumbers {
+            numbers = episodeNumbers
+        } else {
+            // Fall back to the catalog's episode numbers when a caller does not
+            // already hold them.
+            numbers = try await anilist.episodes(for: media).map(\.number)
+        }
+        return try await anilist.playbackEpisodes(for: media, episodeNumbers: numbers, language: settings.preferredAnimeLanguage)
     }
 
     func episodeCatalog(for media: MediaItem) async -> [SeasonEpisodeInfo] {
@@ -312,6 +327,18 @@ final class FrostPlayStore: ObservableObject {
 
     func toggleSource(_ source: PlaybackSource) {
         setSource(source, enabled: !settings.enabledSources.contains(source))
+    }
+
+    /// Sets the default source for a title type. Movies and TV share one default;
+    /// anime has its own because it is addressed by AniList/MAL ID.
+    func setDefaultSource(_ source: PlaybackSource, for kind: MediaKind) {
+        guard PlaybackSource.allowed(for: kind).contains(source) else { return }
+        if kind == .anime {
+            settings.defaultAnimeSource = source
+        } else {
+            settings.defaultMovieTVSource = source
+        }
+        setSource(source, enabled: true)
     }
 
     func refreshCacheBreakdown() async {
