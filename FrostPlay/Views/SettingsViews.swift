@@ -80,7 +80,7 @@ struct SubtitleSettingsView: View {
         Form {
             Section { Text("The quick brown fox").font(.title3.weight(store.settings.boldText ? .bold : .regular)).foregroundStyle(subtitleColor).frame(maxWidth: .infinity).padding(28).background(Color.black).clipShape(RoundedRectangle(cornerRadius: 16)) }
             Section("Subtitles") { Toggle("Use native player", isOn: $store.settings.subtitleUseNativePlayer) }
-            Section("Color") { Picker("Color", selection: $store.settings.subtitleColor) { Text("White").tag("white"); Text("Yellow").tag("yellow"); Text("Cyan").tag("cyan"); Text("Green").tag("green") }.pickerStyle(.segmented) }
+            Section("Color") { FrostSegmentedControl(items: ["White", "Yellow", "Cyan", "Green"], selection: subtitleColorSelection) }
             Section("Text size") { Slider(value: $store.settings.textScale, in: 0.85...1.5).tint(frostOrange) }
         }
         .navigationTitle("Subtitles")
@@ -88,6 +88,14 @@ struct SubtitleSettingsView: View {
         .background(frostBackground)
     }
     private var subtitleColor: Color { store.settings.subtitleColor == "yellow" ? .yellow : store.settings.subtitleColor == "cyan" ? .cyan : store.settings.subtitleColor == "green" ? .green : .white }
+
+    /// Bridges the stored lowercase token to the display-cased segmented control.
+    private var subtitleColorSelection: Binding<String> {
+        Binding(
+            get: { store.settings.subtitleColor.capitalized },
+            set: { store.settings.subtitleColor = $0.lowercased() }
+        )
+    }
 }
 
 struct CatalogSettingsView: View {
@@ -120,13 +128,13 @@ struct HomeSectionsSettingsView: View {
                         }
                     }))
                 }
-                Text("Use Edit to drag sections into the order you want on Home.").font(.footnote).foregroundStyle(.secondary)
+                Text("You can also edit Home in place: tap the sliders icon on the Home screen and drag sections into place.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Order") {
                 ForEach(store.settings.homeSections) { section in
-                    Label(section.title, systemImage: "line.3.horizontal")
+                    Label(section.title, systemImage: section.symbolName)
                 }
-                .onMove(perform: store.moveHomeSection)
+                .onMove { indices, newOffset in store.moveHomeSection(from: indices, to: newOffset) }
             }
         }
         .navigationTitle("Home sections")

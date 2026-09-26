@@ -86,7 +86,9 @@ struct AdaptiveBackdrop<Content: View>: View {
 
 struct HomeView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @StateObject private var navigator = MediaNavigator()
     @State private var selectedProvider: StreamingProvider = ProviderCatalog.providers[0]
+    @State private var isEditingSections = false
 
     private var hero: MediaItem { (selectedProvider.id == "all" ? store.homeItems : store.providerItems).first ?? .preview }
     private var visibleItems: [MediaItem] { selectedProvider.id == "all" ? store.homeItems : store.providerItems }
@@ -97,18 +99,15 @@ struct HomeView: View {
         case .continueWatching:
             ContentRail(title: section.title, items: store.history.map(\.media), progress: true)
                 .padding(14)
-                .background(frostPanel.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frostGlass(cornerRadius: 20, opacity: 0.85)
         case .popular:
             ContentRail(title: section.title, items: visibleItems, onReachedEnd: { Task { if selectedProvider.id == "all" { await store.loadMoreHome() } else { await store.loadMoreProviderCatalog(selectedProvider) } } })
                 .padding(14)
-                .background(frostPanel.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frostGlass(cornerRadius: 20, opacity: 0.85)
         case .myList:
             ContentRail(title: section.title, items: store.library)
                 .padding(14)
-                .background(frostPanel.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frostGlass(cornerRadius: 20, opacity: 0.85)
         }
     }
 
@@ -142,6 +141,10 @@ struct HomeView: View {
                             }
                         }
 
+                        if isEditingSections {
+                            HomeSectionsEditor()
+                        }
+
                         if !store.isTMDBConfigured {
                             NoticeCard(title: "Catalog connection needed", message: "Add a TMDB key in Settings to load live movies and shows.", systemImage: "exclamationmark.triangle.fill")
                         }
@@ -152,8 +155,14 @@ struct HomeView: View {
                         if selectedProvider.id != "all", !store.isLoadingProvider, store.providerItems.isEmpty, store.providerError == nil { NoticeCard(title: "No titles found", message: "TMDB did not return titles for this service in the US catalog.", systemImage: "film") }
 
                         HeroCard(media: hero)
-                        ForEach(store.settings.homeSections) { section in
-                            homeSectionView(section)
+                        if isEditingSections {
+                            ForEach(store.settings.homeSections) { section in
+                                EditableHomeSectionCard(section: section)
+                            }
+                        } else {
+                            ForEach(store.settings.homeSections) { section in
+                                homeSectionView(section)
+                            }
                         }
                     }
                     .padding(.horizontal, 16)
@@ -168,17 +177,22 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(destination: HomeSectionsSettingsView()) {
-                        Image(systemName: "rectangle.3.group")
+                    Button {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { isEditingSections.toggle() }
+                    } label: {
+                        Image(systemName: isEditingSections ? "checkmark.circle.fill" : "slider.horizontal.3")
                     }
-                    .accessibilityLabel("Customize Home sections")
+                    .accessibilityLabel(isEditingSections ? "Done editing Home" : "Edit Home sections")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(destination: SettingsView()) { Image(systemName: "gearshape") }
                 }
             }
             .task { await store.loadHome() }
+            .navigationDestination(item: $navigator.detail) { DetailView(media: $0) }
         }
+        .fullScreenCover(item: $navigator.player) { PlayerView(media: $0) }
+        .environmentObject(navigator)
         .preferredColorScheme(.dark)
     }
 }
@@ -240,7 +254,7 @@ struct HeroCard: View {
     var body: some View {
         GeometryReader { proxy in
             let contentWidth = max(proxy.size.width, 0)
-            NavigationLink(destination: DetailView(media: media)) {
+            MediaLink(media: media) {
                 ZStack(alignment: .bottomLeading) {
                     Poster(url: media.backdropURL ?? media.posterURL, width: contentWidth, height: 255)
                     LinearGradient(colors: [.clear, .black.opacity(0.95)], startPoint: .center, endPoint: .bottom)
@@ -275,6 +289,7 @@ struct HeroCard: View {
 
 struct DiscoverView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @StateObject private var navigator = MediaNavigator()
     @State private var filter: DiscoverFilter = .popular
     @State private var provider = "All providers"
     @State private var genre = "All genres"
@@ -308,13 +323,7 @@ struct DiscoverView: View {
                             Text("Discover").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white).frame(maxWidth: .infinity, alignment: .leading)
                             Text("Filter and find your next watch.").foregroundStyle(.white.opacity(0.6))
                         }
-                        Picker("Category", selection: $selectedTab) {
-                            Text("All").tag("All")
-                            Text("Movies").tag("Movies")
-                            Text("Shows").tag("Shows")
-                            Text("Anime").tag("Anime")
-                        }
-                        .pickerStyle(.segmented)
+                        FrostSegmentedControl(items: ["All", "Movies", "Shows", "Anime"], selection: $selectedTab)
                         DiscoverMenu(title: filter.rawValue, icon: "line.3.horizontal.decrease.circle") {
                             ForEach(DiscoverFilter.allCases) { value in Button(value.rawValue) { filter = value } }
                         }
@@ -339,15 +348,9 @@ struct DiscoverView: View {
                             Button {
                                 Task { await store.loadAnimeCatalog() }
                             } label: {
-                                Label("Retry AniList", systemImage: "arrow.clockwise")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.black)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(frostOrange)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                FrostActionLabel(title: "Retry AniList", systemImage: "arrow.clockwise", subtitle: "Reload the anime catalog")
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(FrostPressStyle())
                         }
                         PosterGrid(items: items)
                     }
@@ -368,7 +371,10 @@ struct DiscoverView: View {
                 guard tab == "Anime" || tab == "All" else { return }
                 Task { await store.loadAnimeCatalog() }
             }
+            .navigationDestination(item: $navigator.detail) { DetailView(media: $0) }
         }
+        .fullScreenCover(item: $navigator.player) { PlayerView(media: $0) }
+        .environmentObject(navigator)
         .preferredColorScheme(.dark)
     }
 }
@@ -387,8 +393,7 @@ struct DiscoverMenu<Content: View>: View {
                 .padding(.horizontal, 13)
                 .padding(.vertical, 11)
                 .frame(maxWidth: .infinity)
-                .background(frostPanel)
-                .clipShape(Capsule())
+                .frostGlass(cornerRadius: 14, opacity: 0.85)
         }
     }
 }
@@ -414,7 +419,7 @@ struct PosterGrid: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 18) {
             ForEach(items) { media in
-                NavigationLink(destination: DetailView(media: media)) {
+                MediaLink(media: media) {
                     VStack(alignment: .leading, spacing: 7) {
                         ZStack(alignment: .topTrailing) {
                             Poster(url: media.posterURL, width: nil, height: 220).frame(maxWidth: .infinity)
@@ -441,6 +446,7 @@ struct PosterGrid: View {
 
 struct SearchView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @StateObject private var navigator = MediaNavigator()
     @State private var query = ""
     @State private var kind: MediaKind?
     var body: some View {
@@ -453,7 +459,7 @@ struct SearchView: View {
                         if !query.isEmpty { Button { query = ""; store.searchResults = [] } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.45)) } }
                     }
                     .padding(14).background(frostPanel).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    Picker("Type", selection: $kind) { Text("All").tag(MediaKind?.none); ForEach(MediaKind.allCases) { Text($0.title).tag(Optional($0)) } }.pickerStyle(.segmented)
+                    FrostSegmentedControl<MediaKind?>(items: [nil, .movie, .tv, .anime], title: { $0?.title ?? "All" }, selection: $kind)
                     if store.isSearching { ProgressView("Searching…").tint(frostOrange).padding(.top, 30) }
                     else if let error = store.searchError { NoticeCard(title: "Search unavailable", message: error, systemImage: "magnifyingglass") }
                     else if store.searchResults.isEmpty { ContentUnavailableView("Start exploring", systemImage: "sparkles", description: Text("Search the TMDB and AniList catalogs.")) }
@@ -465,13 +471,17 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(item: $navigator.detail) { DetailView(media: $0) }
         }
+        .fullScreenCover(item: $navigator.player) { PlayerView(media: $0) }
+        .environmentObject(navigator)
         .preferredColorScheme(.dark)
     }
 }
 
 struct LibraryView: View {
     @EnvironmentObject private var store: FrostPlayStore
+    @StateObject private var navigator = MediaNavigator()
     @State private var section = "My List"
 
     var body: some View {
@@ -483,11 +493,7 @@ struct LibraryView: View {
                             Text("Library").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
                             Text(section == "My List" ? "Your saved titles, ready when you are." : "Offline files stored on this device.").font(.subheadline).foregroundStyle(.white.opacity(0.58))
                         }
-                        Picker("Library", selection: $section) {
-                            Text("My List").tag("My List")
-                            Text("Downloads").tag("Downloads")
-                        }
-                        .pickerStyle(.segmented)
+                        FrostSegmentedControl(items: ["My List", "Downloads"], selection: $section)
                         if section == "My List" {
                             if store.library.isEmpty { ContentUnavailableView("Your list is empty", systemImage: "bookmark", description: Text("Save movies, shows, and anime to find them here.")) }
                             else { PosterGrid(items: store.library) }
@@ -501,7 +507,10 @@ struct LibraryView: View {
             }
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(item: $navigator.detail) { DetailView(media: $0) }
         }
+        .fullScreenCover(item: $navigator.player) { PlayerView(media: $0) }
+        .environmentObject(navigator)
         .preferredColorScheme(.dark)
     }
 }
@@ -551,7 +560,7 @@ struct SettingsView: View {
                 NavigationLink { SubtitleSettingsView() } label: { SettingsRow(icon: "captions.bubble", title: "Subtitles", subtitle: "Native player, color, and sizing") }
                 NavigationLink { CatalogSettingsView() } label: { SettingsRow(icon: "key", title: "Catalog & API", subtitle: store.isTMDBConfigured ? "TMDB connected" : "TMDB key required") }
                 NavigationLink { SourceSettingsView() } label: { SettingsRow(icon: "arrow.triangle.2.circlepath", title: "Sources", subtitle: "Priority and availability") }
-                NavigationLink { HomeSectionsSettingsView() } label: { SettingsRow(icon: "rectangle.3.group", title: "Home sections", subtitle: "Choose and reorder Home rails") }
+                NavigationLink { HomeSectionsSettingsView() } label: { SettingsRow(icon: "rectangle.3.group", title: "Home sections", subtitle: "Edit in place on the Home screen") }
                 NavigationLink { CacheSettingsView() } label: { SettingsRow(icon: "internaldrive", title: "Cache", subtitle: "View storage and clear temporary data") }
             }
             .scrollContentBackground(.hidden)
@@ -620,7 +629,7 @@ struct ContentRail: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(items) { media in
-                            NavigationLink(destination: DetailView(media: media)) {
+                            MediaLink(media: media) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Poster(url: media.posterURL, width: 106, height: 150)
                                     Text(displayTitle(media.title, maxCharacters: 20))
@@ -673,6 +682,11 @@ struct DetailView: View {
     @State private var refreshedAnimeMetadata: MediaMetadata?
     @State private var isLoadingAnimeMetadata = false
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
+    /// Movies (and anime films) play straight from the detail screen.
+    private var isPlayable: Bool {
+        media.kind == .movie || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() == "MOVIE")
+    }
+    private var currentSource: PlaybackSource { store.settings.defaultSource(for: media.kind) }
 
     var body: some View {
         ScrollView {
@@ -737,55 +751,39 @@ struct DetailView: View {
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.58))
                 }
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack(spacing: 8) {
-                        Button {
-                            store.toggleLibrary(media)
-                        } label: {
-                            Label(store.isInLibrary(media) ? "Saved" : "Add to My List", systemImage: store.isInLibrary(media) ? "checkmark" : "bookmark")
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.82)
-                                .foregroundStyle(.black)
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 10)
-                                .background(frostOrange)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        if media.kind == .movie || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() == "MOVIE") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        if isPlayable {
                             NavigationLink {
                                 PlayerView(media: media)
                             } label: {
-                                Label("Play", systemImage: "play.fill")
-                                    .font(.subheadline.weight(.semibold))
-                                    .lineLimit(1)
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 13)
-                                    .padding(.vertical, 10)
-                                    .background(frostPanel)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
+                                FrostActionLabel(title: "Play", systemImage: "play.fill", subtitle: "Start streaming", prominent: true)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(FrostPressStyle())
                         }
+                        Button {
+                            store.toggleLibrary(media)
+                        } label: {
+                            FrostActionLabel(
+                                title: store.isInLibrary(media) ? "Saved" : "My List",
+                                systemImage: store.isInLibrary(media) ? "checkmark" : "bookmark",
+                                subtitle: store.isInLibrary(media) ? "In your list" : "Save for later"
+                            )
+                        }
+                        .buttonStyle(FrostPressStyle())
                     }
                     Button {
                         showingSourcePicker = true
                     } label: {
-                        Label("Choose source", systemImage: "rectangle.2.swap")
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity, minHeight: 42)
-                            .background(frostPanel)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
+                        FrostActionLabel(
+                            title: currentSource.rawValue,
+                            systemImage: "rectangle.2.swap",
+                            subtitle: "Playback source · tap to change",
+                            trailingChevron: true
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Choose source")
+                    .buttonStyle(FrostPressStyle())
+                    .accessibilityLabel("Change playback source, currently \(currentSource.rawValue)")
                 }
                 if media.kind == .tv || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() != "MOVIE") {
                     EpisodePanel(media: media, seasons: $seasons, selectedSeason: $selectedSeason, selectedEpisode: $selectedEpisode, isLoading: $isLoadingEpisodes)
@@ -822,10 +820,16 @@ struct DetailBadge: View {
         Label(label, systemImage: icon)
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.white.opacity(0.78))
-            .padding(.horizontal, 9)
+            .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.08))
-            .clipShape(Capsule())
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+            )
     }
 }
 
@@ -889,9 +893,15 @@ struct EpisodePanel: View {
                 HStack(spacing: 8) {
                     Text(streamError).font(.caption).foregroundStyle(.orange)
                     Spacer()
-                    Button("Retry") { Task { await loadAnimeStreams() } }
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(frostOrange)
+                    Button { Task { await loadAnimeStreams() } } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(frostOrange)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 7)
+                            .frostGlass(cornerRadius: 11, opacity: 0.8)
+                    }
+                    .buttonStyle(FrostPressStyle())
                 }
             }
             if seasons.count > 1 {
@@ -936,9 +946,13 @@ struct EpisodePanel: View {
                                 Poster(url: imageURL, width: 92, height: 58)
                             } else {
                                 ZStack {
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.12))
-                                    Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? .black : .white)
-                                }.frame(width: 48, height: 40)
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.09))
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                                    Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? Color.black : Color.white)
+                                }
+                                .frame(width: 48, height: 40)
                             }
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(episode.name)
@@ -954,9 +968,15 @@ struct EpisodePanel: View {
                                 .font(.caption)
                                 .foregroundStyle(media.kind == .anime && episode.playbackURL == nil ? .orange : frostOrange)
                         }
-                        .padding(10)
-                        .background(episode.number == selectedEpisode ? frostOrange.opacity(0.14) : Color.white.opacity(0.045))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .padding(11)
+                        .background(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .fill(episode.number == selectedEpisode ? frostOrange.opacity(0.12) : Color.white.opacity(0.04))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .strokeBorder(episode.number == selectedEpisode ? frostOrange.opacity(0.45) : Color.white.opacity(0.07), lineWidth: 1)
+                        )
                     }
                     .buttonStyle(.plain)
                     .simultaneousGesture(TapGesture().onEnded { selectedEpisode = episode.number })
@@ -964,8 +984,7 @@ struct EpisodePanel: View {
             }
         }
         .padding(14)
-        .background(frostPanel)
-        .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .frostGlass(cornerRadius: 20, opacity: 0.9)
         .task(id: media.id) {
             streamURLs = [:]
             streamError = nil
@@ -997,41 +1016,53 @@ struct SourcePickerView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("This becomes the default for \(kindLabel) titles, and this title starts playing with it right away.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .fixedSize(horizontal: false, vertical: true)
                     ForEach(compatibleSources) { source in
                         Button {
-                            store.setDefaultSource(source, for: media.kind)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                store.setDefaultSource(source, for: media.kind)
+                            }
                             dismiss()
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: source == selectedSource ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(source == selectedSource ? .green : .secondary)
+                                    .font(.title3)
+                                    .foregroundStyle(source == selectedSource ? frostOrange : Color.white.opacity(0.32))
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(source.rawValue).foregroundStyle(.primary)
-                                    Text(source == selectedSource ? "Current default for \(kindLabel)" : "Use for \(kindLabel)")
+                                    Text(source.rawValue).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                                    Text(source == selectedSource ? "Current default for \(kindLabel)" : source.blurb)
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(.white.opacity(0.55))
                                 }
-                                Spacer()
+                                Spacer(minLength: 0)
                             }
-                            .contentShape(Rectangle())
+                            .padding(13)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frostGlass(cornerRadius: 15, highlighted: source == selectedSource, opacity: 0.9)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(FrostPressStyle())
                     }
                     if compatibleSources.isEmpty {
-                        Text("No verified source is available for this title type.").foregroundStyle(.secondary)
+                        Text("No verified source is available for this title type.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.6))
                     }
-                } header: {
-                    Text("Available sources")
-                } footer: {
-                    Text("Selecting a source makes it the default for \(kindLabel) titles, and this title starts playing with it right away.")
                 }
+                .padding(16)
             }
+            .background(frostBackground.ignoresSafeArea())
             .navigationTitle("Sources")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }
         .presentationDetents([.medium, .large])
+        .presentationBackground(frostBackground)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -1060,17 +1091,27 @@ struct PlayerView: View {
                     Image(systemName: "xmark")
                         .font(.caption.bold())
                         .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Color.white.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .frame(width: 36, height: 36)
+                        .frostGlass(cornerRadius: 12, opacity: 0.9)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FrostPressStyle())
                 VStack(alignment: .leading, spacing: 2) {
                     Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1)
                     Text(resolvedPlayback?.source.rawValue.uppercased() ?? "FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
                 }
                 Spacer()
-                Button("Source") { showingSourcePicker = true }.font(.caption.bold()).buttonStyle(.bordered)
+                Button { showingSourcePicker = true } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.2.swap").font(.caption2.bold())
+                        Text("Source").font(.caption.bold())
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frostGlass(cornerRadius: 12, opacity: 0.9)
+                }
+                .buttonStyle(FrostPressStyle())
+                .accessibilityLabel("Change playback source")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -1078,15 +1119,9 @@ struct PlayerView: View {
                 HybridPlayer(format: format).frame(maxHeight: .infinity)
                 if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
                     Button { Task { try? await store.download(media: media, format: format, episode: media.kind == .movie ? nil : episode) } } label: {
-                        Label("Download MP4", systemImage: "arrow.down.circle.fill")
-                            .font(.subheadline.bold())
-                            .foregroundStyle(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(frostOrange)
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        FrostActionLabel(title: "Download MP4", systemImage: "arrow.down.circle.fill", subtitle: "Save this file for offline playback", prominent: true)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(FrostPressStyle())
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }

@@ -309,12 +309,61 @@ final class FrostPlayStore: ObservableObject {
         history.insert(entry, at: 0)
     }
 
+    func isInHistory(_ media: MediaItem) -> Bool {
+        history.contains { $0.id == media.id }
+    }
+
+    /// Removes a title from Continue Watching / watch history only. It stays in My List.
+    func removeFromHistory(_ media: MediaItem) {
+        history.removeAll { $0.id == media.id }
+    }
+
+    func clearHistory() {
+        history.removeAll()
+    }
+
+    func addToLibrary(_ media: MediaItem) {
+        guard !library.contains(media) else { return }
+        library.insert(media, at: 0)
+    }
+
+    func removeFromLibrary(_ media: MediaItem) {
+        library.removeAll { $0 == media }
+    }
+
     func moveSource(from source: IndexSet, to destination: Int) {
         settings.enabledSources.move(fromOffsets: source, toOffset: destination)
     }
 
     func moveHomeSection(from source: IndexSet, to destination: Int) {
         settings.homeSections.move(fromOffsets: source, toOffset: destination)
+    }
+
+    /// Drag-and-drop reorder used by the on-Home section editor: moves `section`
+    /// so it sits directly before `target` in the visible order.
+    func moveHomeSection(_ section: HomeSection, before target: HomeSection) {
+        guard section != target,
+              let from = settings.homeSections.firstIndex(of: section),
+              let to = settings.homeSections.firstIndex(of: target) else { return }
+        settings.homeSections.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+    }
+
+    /// Moves a section one slot up (-1) or down (+1); used by the arrow buttons in
+    /// the on-Home section editor.
+    func nudgeHomeSection(_ section: HomeSection, by offset: Int) {
+        guard let index = settings.homeSections.firstIndex(of: section) else { return }
+        let target = index + offset
+        guard settings.homeSections.indices.contains(target) else { return }
+        settings.homeSections.swapAt(index, target)
+    }
+
+    func addHomeSection(_ section: HomeSection) {
+        guard !settings.homeSections.contains(section) else { return }
+        settings.homeSections.append(section)
+    }
+
+    func removeHomeSection(_ section: HomeSection) {
+        settings.homeSections.removeAll { $0 == section }
     }
 
     func setSource(_ source: PlaybackSource, enabled: Bool) {

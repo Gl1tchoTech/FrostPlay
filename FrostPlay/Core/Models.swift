@@ -4,7 +4,13 @@ import SwiftUI
 enum MediaKind: String, Codable, CaseIterable, Identifiable, Hashable {
     case movie, tv, anime
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .movie: return "Movie"
+        case .tv: return "TV"
+        case .anime: return "Anime"
+        }
+    }
 }
 
 enum PlaybackFormat: Codable, Equatable {
@@ -135,6 +141,18 @@ enum PlaybackSource: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// One-line description shown when choosing a default source.
+    var blurb: String {
+        switch self {
+        case .megaPlay: return "Anime, addressed by AniList or MAL ID"
+        case .vidLink: return "Movies and TV, addressed by TMDB ID"
+        case .moviesAPI: return "Movies and TV, addressed by TMDB ID"
+        case .vidAPI: return "Not available yet"
+        case .cineSRC: return "Not available yet"
+        case .autoEmbed: return "Not available yet"
+        }
+    }
+
     /// The sources that are legal for a title type. MegaPlay is anime-only and the
     /// TMDB embeds are movie/TV-only, so a title can never be routed to a source
     /// that does not support it (a TMDB title can never attempt MegaPlay).
@@ -244,6 +262,24 @@ enum HomeSection: String, Codable, CaseIterable, Identifiable {
         case .continueWatching: return "Continue Watching"
         case .popular: return "Popular Right Now"
         case .myList: return "Your List"
+        }
+    }
+
+    /// Short description shown in the on-Home section editor.
+    var subtitle: String {
+        switch self {
+        case .continueWatching: return "Pick up where you left off"
+        case .popular: return "Trending movies and shows"
+        case .myList: return "Titles you saved"
+        }
+    }
+
+    /// SF Symbol shown in the on-Home section editor.
+    var symbolName: String {
+        switch self {
+        case .continueWatching: return "play.circle.fill"
+        case .popular: return "flame.fill"
+        case .myList: return "bookmark.fill"
         }
     }
 

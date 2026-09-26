@@ -18,4 +18,7 @@ An iOS streaming app with TV, Movies, and Anime
 - Source adapters are isolated behind a shared resolver so source priority and fallback behavior can be changed in Settings.
 - Playback sources are separated by title type. Settings stores a default source for anime and a separate default for movies/TV, and the resolver only offers MegaPlay to anime (addressed by AniList/MAL ID) and VidLink/MoviesAPI to TMDB titles, so a TMDB title can never attempt MegaPlay. The source picker on a title writes the default for that title type.
 - AniList owns anime display metadata and episode rows; titles that publish no per-episode title get positional episode numbering instead of an empty list.
+- The interface uses a single glass design system (`FrostPlay/Views/Components.swift`): continuous rounded surfaces with a hairline highlight instead of capsule pills or hard squares, an animated segmented control, and glass action rows for Play / My List / Source.
+- Every title surface (Home rails, hero, poster grids) supports a long-press menu with View details, Play, Add to / Remove from My List, and Remove from watch history.
+- Home sections are edited in place on the Home screen: tap the sliders icon, long-press and drag a section to reorder it, tap − to remove it, and add hidden sections back from the same panel. The Settings > Home sections screen remains as a secondary route.
 - TMDB requires a `TMDB_API_KEY` value in the app target's configuration; it must not be hard-coded into source files.
