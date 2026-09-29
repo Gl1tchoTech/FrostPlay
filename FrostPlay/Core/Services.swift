@@ -24,6 +24,61 @@ protocol MetadataService {
     func search(query: String, kind: MediaKind?, page: Int) async throws -> [MediaItem]
 }
 
+/// The Home catalog feeds. Home picks one at random on every visit (unless
+/// rotation is turned off in Settings) so the screen is never the same row of
+/// titles twice in a row.
+enum HomeFeed: String, CaseIterable, Identifiable {
+    case trendingToday
+    case trendingThisWeek
+    case popularMovies
+    case popularShows
+    case topRatedMovies
+    case topRatedShows
+
+    var id: String { rawValue }
+
+    /// Shown above the rail so the current pick is never a mystery.
+    var title: String {
+        switch self {
+        case .trendingToday: return "Trending Today"
+        case .trendingThisWeek: return "Trending This Week"
+        case .popularMovies: return "Popular Movies"
+        case .popularShows: return "Popular Shows"
+        case .topRatedMovies: return "Top Rated Movies"
+        case .topRatedShows: return "Top Rated Shows"
+        }
+    }
+
+    var path: String {
+        switch self {
+        case .trendingToday: return "trending/all/day"
+        case .trendingThisWeek: return "trending/all/week"
+        case .popularMovies, .topRatedMovies: return "discover/movie"
+        case .popularShows, .topRatedShows: return "discover/tv"
+        }
+    }
+
+    var sortBy: String? {
+        switch self {
+        case .trendingToday, .trendingThisWeek: return nil
+        case .popularMovies, .popularShows: return "popularity.desc"
+        case .topRatedMovies, .topRatedShows: return "vote_average.desc"
+        }
+    }
+
+    var fallbackKind: MediaKind? {
+        switch self {
+        case .trendingToday, .trendingThisWeek: return nil
+        case .popularMovies, .topRatedMovies: return .movie
+        case .popularShows, .topRatedShows: return .tv
+        }
+    }
+
+    /// What Home uses when rotation is switched off, so the pinned default is
+    /// still a sensible catalog.
+    static let pinned: HomeFeed = .trendingThisWeek
+}
+
 struct TMDBService: MetadataService {
     let apiKey: String
     let readAccessToken: String
@@ -70,6 +125,57 @@ struct TMDBService: MetadataService {
         let data = try await request(path: "trending/all/week", query: [URLQueryItem(name: "page", value: String(page))])
         let payload = try decode(TMDBSearchResponse.self, from: data)
         return payload.results.compactMap { makeMediaItem($0, fallbackKind: nil) }
+    }
+
+    /// One of the rotating Home feeds. The trending feeds already report a media
+    /// type per result, so only the discover feeds need a fallback kind.
+    func homeFeed(_ feed: HomeFeed, page: Int = 1) async throws -> [MediaItem] {
+        guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
+        var query = [URLQueryItem(name: "page", value: String(page))]
+        if let sortBy = feed.sortBy {
+            query.append(URLQueryItem(name: "sort_by", value: sortBy))
+            query.append(URLQueryItem(name: "include_adult", value: "false"))
+            if feed == .topRatedMovies || feed == .topRatedShows {
+                // Without a vote floor "top rated" surfaces titles with one vote.
+                query.append(URLQueryItem(name: "vote_count.gte", value: "500"))
+            }
+        }
+        let data = try await request(path: feed.path, query: query)
+        return try decode(TMDBSearchResponse.self, from: data).results.compactMap { makeMediaItem($0, fallbackKind: feed.fallbackKind) }
+    }
+
+    /// Popular titles for one kind with no query and no service filter. Backs the
+    /// browsable Search and Discover tabs, which must load a catalog on tap
+    /// instead of requiring a typed query.
+    func popular(kind: MediaKind, page: Int = 1) async throws -> [MediaItem] {
+        guard kind == .movie || kind == .tv else { throw FrostPlayServiceError.unsupportedMediaKind }
+        guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
+        let data = try await request(path: kind == .tv ? "discover/tv" : "discover/movie", query: [
+            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "page", value: String(page))
+        ])
+        return try decode(TMDBSearchResponse.self, from: data).results.compactMap { makeMediaItem($0, fallbackKind: kind) }
+    }
+
+    /// Maps TMDB's regional watch-provider IDs to the official service logos TMDB
+    /// hosts, so every Browse-by-Service tile shows the real logo instead of a
+    /// monogram. Both the movie and TV provider lists are merged because some
+    /// services only appear in one of them.
+    func providerLogos(region: String = "US") async throws -> [Int: URL] {
+        guard isConfigured else { throw FrostPlayServiceError.missingTMDBCredential }
+        var logos: [Int: URL] = [:]
+        for path in ["watch/providers/movie", "watch/providers/tv"] {
+            guard let data = try? await request(path: path, query: [URLQueryItem(name: "watch_region", value: region)]),
+                  let payload = try? decode(TMDBProviderResponse.self, from: data) else { continue }
+            for provider in payload.results {
+                guard logos[provider.providerID] == nil,
+                      let logoPath = provider.logoPath,
+                      let url = URL(string: "https://image.tmdb.org/t/p/w185\(logoPath)") else { continue }
+                logos[provider.providerID] = url
+            }
+        }
+        return logos
     }
 
     func catalog(for providerID: Int, providerName: String, region: String = "US", page: Int = 1) async throws -> [MediaItem] {
@@ -762,6 +868,324 @@ struct AniListService: MetadataService {
     }
 }
 
+// MARK: - Kitsu
+
+private struct KitsuAnime: Hashable {
+    let id: Int
+    let episodeCount: Int?
+}
+
+/// Kitsu is a free, keyless anime database. AniList stays authoritative for
+/// FrostPlay's anime catalog, episode numbering, and MegaPlay playback URLs, but
+/// AniList publishes no per-episode titles, synopses, air dates, or artwork for
+/// most titles. Kitsu fills exactly that gap, and it publishes `anilist/anime` and
+/// `myanimelist/anime` mappings, so it can be addressed with the IDs FrostPlay
+/// already holds. See https://kitsu.io/api/edge.
+struct KitsuService {
+    let session: URLSession = .shared
+
+    private static let base = "https://kitsu.io/api/edge"
+    /// Kitsu is community-run and rate-limits aggressively, so enrichment is
+    /// bounded: at most this many episodes are described for any one title.
+    private static let pageSize = 20
+    private static let maximumEpisodePages = 5
+
+    struct EpisodeDetails {
+        let episodes: [EpisodeInfo]
+        /// Kitsu's own total episode count, which is populated for some titles
+        /// where AniList reports `null`.
+        let reportedCount: Int?
+    }
+
+    /// Resolves the title through Kitsu's published ID mappings and returns its
+    /// per-episode details. Any failure means "Kitsu has nothing to add", so anime
+    /// still loads from AniList alone.
+    func episodeDetails(aniListID: Int?, malID: Int?, title: String?) async -> EpisodeDetails {
+        guard let match = await resolveAnime(aniListID: aniListID, malID: malID, title: title) else {
+            return EpisodeDetails(episodes: [], reportedCount: nil)
+        }
+        let rows = (try? await episodes(kitsuID: match.id)) ?? []
+        return EpisodeDetails(episodes: rows, reportedCount: match.episodeCount)
+    }
+
+    private func resolveAnime(aniListID: Int?, malID: Int?, title: String?) async -> KitsuAnime? {
+        if let aniListID, let cached = await KitsuCache.shared.anime(aniListID: aniListID) { return cached }
+        if let malID, let cached = await KitsuCache.shared.anime(malID: malID) { return cached }
+
+        if let aniListID, let match = try? await anime(mapping: "anilist/anime", externalID: aniListID) {
+            await KitsuCache.shared.store(match, aniListID: aniListID, malID: malID)
+            return match
+        }
+        if let malID, let match = try? await anime(mapping: "myanimelist/anime", externalID: malID) {
+            await KitsuCache.shared.store(match, aniListID: aniListID, malID: malID)
+            return match
+        }
+        if let title, !title.isEmpty, let match = try? await anime(matchingTitle: title) {
+            await KitsuCache.shared.store(match, aniListID: aniListID, malID: malID)
+            return match
+        }
+        return nil
+    }
+
+    /// One request resolves an AniList or MAL ID to Kitsu's anime record, whose
+    /// `included` payload already carries the attributes we need.
+    private func anime(mapping site: String, externalID: Int) async throws -> KitsuAnime {
+        let path = "mappings?filter%5BexternalSite%5D=\(site)&filter%5BexternalId%5D=\(externalID)&include=item&page%5Blimit%5D=1"
+        guard let url = URL(string: "\(Self.base)/\(path)") else { throw FrostPlayServiceError.invalidResponse }
+        let payload = try JSONDecoder().decode(KitsuMappingResponse.self, from: try await fetch(url))
+        guard let mapping = payload.data.first,
+              let id = mapping.relationships?.item?.data?.id,
+              let kitsuID = Int(id) else { throw FrostPlayServiceError.decodingFailed }
+        let resource = payload.included?.first { $0.id == id }
+        return KitsuAnime(id: kitsuID, episodeCount: resource?.attributes?.episodeCount)
+    }
+
+    /// Last resort for a title that reaches Kitsu with no external ID at all.
+    private func anime(matchingTitle title: String) async throws -> KitsuAnime {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?+")
+        let query = title.addingPercentEncoding(withAllowedCharacters: allowed) ?? title
+        let path = "anime?filter%5Btext%5D=\(query)&page%5Blimit%5D=1"
+        guard let url = URL(string: "\(Self.base)/\(path)") else { throw FrostPlayServiceError.invalidResponse }
+        let payload = try JSONDecoder().decode(KitsuAnimeListResponse.self, from: try await fetch(url))
+        guard let first = payload.data.first, let kitsuID = Int(first.id) else {
+            throw FrostPlayServiceError.decodingFailed
+        }
+        return KitsuAnime(id: kitsuID, episodeCount: first.attributes?.episodeCount)
+    }
+
+    private func episodes(kitsuID: Int) async throws -> [EpisodeInfo] {
+        if let cached = await KitsuCache.shared.rows(forKitsuID: kitsuID) { return cached }
+        var rows: [EpisodeInfo] = []
+        for page in 0..<Self.maximumEpisodePages {
+            let offset = page * Self.pageSize
+            let path = "anime/\(kitsuID)/episodes?page%5Blimit%5D=\(Self.pageSize)&page%5Boffset%5D=\(offset)"
+            guard let url = URL(string: "\(Self.base)/\(path)"),
+                  let data = try? await fetch(url),
+                  let payload = try? JSONDecoder().decode(KitsuEpisodeListResponse.self, from: data) else { break }
+            rows.append(contentsOf: payload.data.compactMap(\.episodeInfo))
+            if payload.data.count < Self.pageSize { break }
+        }
+        if !rows.isEmpty { await KitsuCache.shared.store(rows, forKitsuID: kitsuID) }
+        return rows
+    }
+
+    private func fetch(_ url: URL) async throws -> Data {
+        // Serializing Kitsu requests keeps a burst of detail screens from tripping
+        // its rate limit.
+        await KitsuRequestThrottle.shared.wait()
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        return data
+    }
+}
+
+/// Merges Kitsu's per-episode details into the episode rows AniList owns.
+enum EpisodeDetailsMerger {
+    /// AniList stays authoritative for episode numbers, row order, and the
+    /// MegaPlay playback URL. Kitsu only contributes display data it actually has,
+    /// and never replaces a title AniList already published.
+    static func merge(base: [EpisodeInfo], details: [EpisodeInfo], expectedCount: Int?) -> [EpisodeInfo] {
+        var detailByNumber: [Int: EpisodeInfo] = [:]
+        for detail in details where detailByNumber[detail.number] == nil {
+            detailByNumber[detail.number] = detail
+        }
+
+        var merged = base.map { row -> EpisodeInfo in
+            guard let detail = detailByNumber[row.number] else { return row }
+            return EpisodeInfo(
+                number: row.number,
+                name: isPlaceholder(row.name, number: row.number) ? detail.name : row.name,
+                overview: row.overview.isEmpty ? detail.overview : row.overview,
+                airDate: row.airDate ?? detail.airDate,
+                imageURL: row.imageURL ?? detail.imageURL,
+                playbackURL: row.playbackURL
+            )
+        }
+
+        var covered = Set(merged.map(\.number))
+        for detail in details where !covered.contains(detail.number) {
+            merged.append(detail)
+            covered.insert(detail.number)
+        }
+
+        // Only pad when the caller knows the title has more episodes than we could
+        // describe, so the count AniList reported is still honored.
+        if let expectedCount {
+            let target = min(max(expectedCount, merged.count), 2_000)
+            if target > merged.count {
+                for number in 1...target where !covered.contains(number) {
+                    merged.append(
+                        EpisodeInfo(number: number, name: "Episode \(number)", overview: "", airDate: nil, imageURL: nil)
+                    )
+                }
+            }
+        }
+        return merged.sorted { $0.number < $1.number }
+    }
+
+    /// True when a row still carries FrostPlay's generated "Episode N" label.
+    private static func isPlaceholder(_ name: String, number: Int) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "Episode \(number)"
+    }
+}
+
+/// Caches Kitsu lookups so revisiting a title never re-requests it.
+private actor KitsuCache {
+    static let shared = KitsuCache()
+    private var animeByAniListID: [Int: KitsuAnime] = [:]
+    private var animeByMALID: [Int: KitsuAnime] = [:]
+    private var rowsByKitsuID: [Int: [EpisodeInfo]] = [:]
+
+    func anime(aniListID: Int) -> KitsuAnime? { animeByAniListID[aniListID] }
+    func anime(malID: Int) -> KitsuAnime? { animeByMALID[malID] }
+
+    func store(_ value: KitsuAnime, aniListID: Int?, malID: Int?) {
+        if let aniListID { animeByAniListID[aniListID] = value }
+        if let malID { animeByMALID[malID] = value }
+    }
+
+    func rows(forKitsuID id: Int) -> [EpisodeInfo]? { rowsByKitsuID[id] }
+    func store(_ value: [EpisodeInfo], forKitsuID id: Int) { rowsByKitsuID[id] = value }
+
+    /// Approximate footprint reported by the Cache screen.
+    func approximateByteCount() -> Int {
+        var total = 0
+        for rows in rowsByKitsuID.values {
+            for row in rows {
+                total += 220 + row.name.utf8.count + row.overview.utf8.count
+            }
+        }
+        return total
+    }
+
+    func clear() {
+        animeByAniListID.removeAll()
+        animeByMALID.removeAll()
+        rowsByKitsuID.removeAll()
+    }
+}
+
+/// Kitsu is community-run; requests are serialized with a small gap so a burst of
+/// detail screens cannot trip its rate limit. The gap is deliberately short so a
+/// multi-page episode lookup still finishes in about a second.
+private actor KitsuRequestThrottle {
+    static let shared = KitsuRequestThrottle()
+    private var lastRequest = Date.distantPast
+    private let minimumInterval: TimeInterval = 0.4
+
+    func wait() async {
+        let elapsed = Date().timeIntervalSince(lastRequest)
+        if elapsed < minimumInterval {
+            try? await Task.sleep(nanoseconds: UInt64((minimumInterval - elapsed) * 1_000_000_000))
+        }
+        lastRequest = Date()
+    }
+}
+
+/// Type-erased access to the Kitsu caches for the Cache screen.
+enum KitsuCacheInfo {
+    static func approximateByteCount() async -> Int {
+        await KitsuCache.shared.approximateByteCount()
+    }
+
+    static func clear() async {
+        await KitsuCache.shared.clear()
+    }
+}
+
+private struct KitsuMappingResponse: Decodable {
+    let data: [Mapping]
+    let included: [KitsuAnimeResource]?
+
+    struct Mapping: Decodable {
+        let relationships: Relationships?
+
+        struct Relationships: Decodable {
+            let item: Item?
+
+            struct Item: Decodable {
+                let data: ItemData?
+
+                struct ItemData: Decodable {
+                    let id: String
+                }
+            }
+        }
+    }
+}
+
+private struct KitsuAnimeListResponse: Decodable {
+    let data: [KitsuAnimeResource]
+}
+
+private struct KitsuAnimeResource: Decodable {
+    let id: String
+    let attributes: Attributes?
+
+    struct Attributes: Decodable {
+        let episodeCount: Int?
+    }
+}
+
+private struct KitsuEpisodeListResponse: Decodable {
+    let data: [KitsuEpisodeResource]
+}
+
+private struct KitsuEpisodeResource: Decodable {
+    let attributes: Attributes
+
+    struct Attributes: Decodable {
+        let canonicalTitle: String?
+        let synopsis: String?
+        let airdate: String?
+        let number: Int?
+        let relativeNumber: Int?
+        let thumbnail: Thumbnail?
+        let titles: Titles?
+
+        struct Thumbnail: Decodable {
+            let original: String?
+        }
+
+        struct Titles: Decodable {
+            let english: String?
+            let romaji: String?
+
+            enum CodingKeys: String, CodingKey {
+                case english = "en_us"
+                case romaji = "en_jp"
+            }
+        }
+    }
+
+    /// Kitsu numbers its own episodes and publishes a title per episode, which is
+    /// exactly what AniList omits.
+    var episodeInfo: EpisodeInfo? {
+        guard let number = attributes.number ?? attributes.relativeNumber, number > 0 else { return nil }
+        let candidate = attributes.canonicalTitle ?? attributes.titles?.english ?? attributes.titles?.romaji
+        let name: String
+        if let candidate, !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = candidate
+        } else {
+            name = "Episode \(number)"
+        }
+        return EpisodeInfo(
+            number: number,
+            name: name,
+            overview: attributes.synopsis ?? "",
+            airDate: attributes.airdate,
+            imageURL: attributes.thumbnail?.original.flatMap(URL.init)
+        )
+    }
+}
+
 protocol PlaybackSourceAdapter {
     var source: PlaybackSource { get }
     func playback(for media: MediaItem, season: Int?, episode: Int?, language: String) -> PlaybackFormat?
@@ -878,6 +1302,20 @@ private struct TMDBResult: Decodable {
         case backdropPath = "backdrop_path"
         case releaseDate = "release_date"
         case firstAirDate = "first_air_date"
+    }
+}
+
+private struct TMDBProviderResponse: Decodable {
+    let results: [TMDBProvider]
+
+    struct TMDBProvider: Decodable {
+        let providerID: Int
+        let logoPath: String?
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case logoPath = "logo_path"
+        }
     }
 }
 

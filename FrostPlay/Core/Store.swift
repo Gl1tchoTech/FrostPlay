@@ -7,6 +7,7 @@ enum CacheCategory: String, CaseIterable, Identifiable {
     case webKit = "WebKit data"
     case temporaryFiles = "Other cache & temp"
     case animeCatalog = "Anime catalog"
+    case episodeDetails = "Episode details"
 
     var id: String { rawValue }
 }
@@ -14,7 +15,9 @@ enum CacheCategory: String, CaseIterable, Identifiable {
 @MainActor
 final class FrostPlayStore: ObservableObject {
     @Published var settings: FrostPlaySettings { didSet { save(settings, key: "settings") } }
-    @Published private(set) var library: [MediaItem] { didSet { save(library, key: "library") } }
+    /// Every list the user has, including the built-in "My List". This is the
+    /// single source of truth for saved titles; `library` below is a flat view of it.
+    @Published private(set) var collections: [MediaCollection] { didSet { save(collections, key: "collections") } }
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published private(set) var downloads: [DownloadEntry] { didSet { save(downloads, key: "downloads") } }
     @Published var searchResults: [MediaItem] = []
@@ -22,7 +25,7 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var animeError: String?
     @Published private(set) var episodeError: String?
     @Published private(set) var cacheBreakdown: [CacheCategory: Int] = [:]
-    @Published var homeItems: [MediaItem] = [.preview]
+    @Published var homeItems: [MediaItem] = []
     @Published var providerItems: [MediaItem] = []
     @Published var isSearching = false
     @Published var isLoadingHome = false
@@ -32,20 +35,45 @@ final class FrostPlayStore: ObservableObject {
     @Published var providerError: String?
     @Published var isLoadingMore = false
     @Published private(set) var hasMoreResults = true
+    /// Official service logos keyed by TMDB watch-provider ID, used by the Home
+    /// Browse-by-Service tiles and the service rail headings.
+    @Published private(set) var providerLogos: [Int: URL] = [:]
+    /// Which Home feed is currently on screen, so the rail can name its pick.
+    @Published private(set) var homeFeed: HomeFeed = .pinned
 
     private let anilist = AniListService()
+    private let kitsu = KitsuService()
     private var searchPage = 1
     private var homePage = 1
     private var providerPage = 1
     private var activeSearchQuery = ""
     private var activeSearchKind: MediaKind?
     private var activeProviderID: String?
+    /// Random first AniList page for the current browse session so the anime
+    /// catalog does not show the same 20 popularity-sorted titles every visit.
+    private var catalogAnimeStartPage = 1
+    /// Identifies the newest catalog request so a slower, superseded one cannot
+    /// overwrite the results of the tab the user actually selected.
+    private var catalogRequestID = 0
 
     private var tmdb: TMDBService {
         TMDBService(apiKey: settings.tmdbAPIKey, readAccessToken: settings.tmdbReadAccessToken)
     }
 
     var isTMDBConfigured: Bool { tmdb.isConfigured }
+
+    /// Every saved title across all lists, newest first and de-duplicated. Kept
+    /// computed so the Home rail, poster grids, and long-press menus keep working
+    /// unchanged now that storage is multi-list.
+    var library: [MediaItem] {
+        var seen = Set<String>()
+        return collections
+            .flatMap(\.entries)
+            .sorted { $0.addedAt > $1.addedAt }
+            .compactMap { entry in
+                seen.insert(entry.media.id).inserted ? entry.media : nil
+            }
+    }
 
     init() {
         var restoredSettings = Self.load(FrostPlaySettings.self, key: "settings") ?? FrostPlaySettings()
@@ -65,7 +93,7 @@ final class FrostPlayStore: ObservableObject {
         restoredSettings.homeSections = restoredSettings.homeSections.filter { HomeSection.allCases.contains($0) }
         if restoredSettings.homeSections.isEmpty { restoredSettings.homeSections = HomeSection.defaultOrder }
         settings = restoredSettings
-        library = Self.load([MediaItem].self, key: "library") ?? []
+        collections = Self.restoredCollections()
         history = Self.load([WatchEntry].self, key: "history") ?? []
         downloads = Self.load([DownloadEntry].self, key: "downloads") ?? []
     }
@@ -74,13 +102,22 @@ final class FrostPlayStore: ObservableObject {
         guard !isLoadingHome else { return }
         isLoadingHome = true
         homeError = nil
+        let started = Date()
+        let hadContent = !homeItems.isEmpty
         do {
             homePage = 1
-            let results = try await tmdb.trending(page: homePage)
+            // A different feed on every visit, so Home is never the same row of
+            // titles twice in a row.
+            homeFeed = settings.rotateHomeCatalog
+                ? (HomeFeed.allCases.randomElement() ?? .pinned)
+                : .pinned
+            let results = try await tmdb.homeFeed(homeFeed, page: homePage)
             if !results.isEmpty { homeItems = results }
+            await loadProviderLogosIfNeeded()
         } catch {
             homeError = error.localizedDescription
         }
+        await holdPlaceholders(since: started, hadContent: hadContent)
         isLoadingHome = false
     }
 
@@ -89,12 +126,25 @@ final class FrostPlayStore: ObservableObject {
         isLoadingMore = true
         homePage += 1
         do {
-            let more = try await tmdb.trending(page: homePage)
+            let more = try await tmdb.homeFeed(homeFeed, page: homePage)
             homeItems.append(contentsOf: more)
         } catch {
             homePage -= 1
         }
         isLoadingMore = false
+    }
+
+    /// Keeps the shimmering placeholders up for a beat even when the network
+    /// answers instantly, so content never flashes in and out. Only the first load
+    /// of a surface pays this cost: once content is on screen, a refresh resolves
+    /// as fast as the network allows.
+    private func holdPlaceholders(since start: Date, hadContent: Bool) async {
+        guard !hadContent, settings.showLoadingPlaceholders else { return }
+        let minimum = settings.minimumPlaceholderSeconds
+        guard minimum > 0 else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        guard elapsed < minimum else { return }
+        try? await Task.sleep(nanoseconds: UInt64((minimum - elapsed) * 1_000_000_000))
     }
 
     func loadProviderCatalog(_ provider: StreamingProvider) async {
@@ -105,21 +155,31 @@ final class FrostPlayStore: ObservableObject {
             return
         }
         isLoadingProvider = true
-        defer { isLoadingProvider = false }
         providerError = nil
+        // Switching services must never leave the previous service's titles on
+        // screen behind the new service's name.
+        if activeProviderID != provider.id { providerItems = [] }
+        let started = Date()
+        let hadContent = !providerItems.isEmpty
         do {
             providerPage = 1
             activeProviderID = provider.id
             let items = try await tmdb.catalog(for: providerID, providerName: provider.name, page: providerPage)
-            guard settings.selectedProvider == provider.name else { return }
-            providerItems = items
-            hasMoreResults = items.count >= 20
-            if providerItems.isEmpty { providerError = "No titles were returned for this service in the US region." }
+            await holdPlaceholders(since: started, hadContent: hadContent)
+            // A slower, superseded request must not overwrite the service the user
+            // actually selected.
+            if settings.selectedProvider == provider.name {
+                providerItems = items
+                hasMoreResults = items.count >= 20
+                if items.isEmpty { providerError = "No titles were returned for this service in the US region." }
+            }
         } catch {
-            guard settings.selectedProvider == provider.name else { return }
-            providerItems = []
-            providerError = error.localizedDescription
+            if settings.selectedProvider == provider.name {
+                providerItems = []
+                providerError = error.localizedDescription
+            }
         }
+        isLoadingProvider = false
     }
 
     func loadMoreProviderCatalog(_ provider: StreamingProvider) async {
@@ -174,18 +234,33 @@ final class FrostPlayStore: ObservableObject {
                 episodeError = "AniList ID is missing for this title."
                 return []
             }
+            var episodes: [EpisodeInfo] = []
+            var resolvedCount = media.episodeCount ?? 0
+            var anilistFailure: String?
             do {
-                let episodes = try await anilist.episodes(for: media)
-                let count = media.episodeCount ?? episodes.count
-                guard count > 0 || !episodes.isEmpty else {
-                    episodeError = "AniList returned no episode information for this title."
-                    return []
-                }
-                return [SeasonEpisodeInfo(season: 1, episodeCount: max(count, episodes.count), episodes: episodes)]
+                episodes = try await anilist.episodes(for: media)
+                resolvedCount = max(resolvedCount, episodes.count)
             } catch {
-                episodeError = error.localizedDescription
+                anilistFailure = error.localizedDescription
+            }
+
+            // AniList owns the numbering, the row order, and the MegaPlay URL.
+            // Kitsu only adds the per-episode titles, synopses, air dates, and
+            // artwork it publishes, and is skipped entirely if it has nothing.
+            if settings.kitsuEpisodeDetails {
+                let details = await kitsu.episodeDetails(aniListID: media.aniListID, malID: media.malID, title: media.title)
+                let expected = max(resolvedCount, max(details.reportedCount ?? 0, details.episodes.count))
+                if !details.episodes.isEmpty || (details.reportedCount ?? 0) > 0 {
+                    episodes = EpisodeDetailsMerger.merge(base: episodes, details: details.episodes, expectedCount: expected)
+                    resolvedCount = max(resolvedCount, episodes.count)
+                }
+            }
+
+            guard resolvedCount > 0 || !episodes.isEmpty else {
+                episodeError = anilistFailure ?? "AniList returned no episode information for this title."
                 return []
             }
+            return [SeasonEpisodeInfo(season: 1, episodeCount: max(resolvedCount, episodes.count), episodes: episodes)]
         }
         guard media.kind == .tv, let tmdbID = media.tmdbID else { return [] }
         do {
@@ -198,9 +273,71 @@ final class FrostPlayStore: ObservableObject {
         }
     }
 
+    /// Loads page one of a browsable catalog for a Search/Discover tab. No query
+    /// is required: movies and TV come from TMDB's popularity discover feed, anime
+    /// from a different random AniList page on every visit, and "All" mixes
+    /// trending movies/TV with anime.
+    func loadCatalog(kind: MediaKind?) async {
+        // Tab switches can overlap; the newest request wins and only it clears the
+        // spinner, so tapping tabs quickly always lands on the right catalog.
+        catalogRequestID += 1
+        let requestID = catalogRequestID
+        isSearching = true
+        searchError = nil
+        let started = Date()
+        let hadContent = !searchResults.isEmpty
+        if kind == nil || kind == .anime { animeError = nil }
+        searchPage = 1
+        activeSearchQuery = ""
+        activeSearchKind = kind
+        // AniList's empty-query search is always popularity page 1, so pick a
+        // random page to keep the anime catalog varied between visits.
+        catalogAnimeStartPage = Int.random(in: 1...80)
+        hasMoreResults = true
+        var results: [MediaItem] = []
+        var failures: [String] = []
+
+        if kind == nil {
+            do { results += try await tmdb.trending(page: searchPage) }
+            catch { failures.append(error.localizedDescription) }
+            do { results += try await anilist.search(query: "", kind: .anime, page: catalogAnimeStartPage) }
+            catch { failures.append("AniList: \(error.localizedDescription)") }
+        } else if kind == .anime {
+            do { results = try await anilist.search(query: "", kind: .anime, page: catalogAnimeStartPage) }
+            catch { failures.append("AniList: \(error.localizedDescription)") }
+        } else if let kind {
+            do { results = try await tmdb.popular(kind: kind, page: searchPage) }
+            catch { failures.append(error.localizedDescription) }
+        }
+
+        await loadProviderLogosIfNeeded()
+        guard requestID == catalogRequestID else { return }
+        searchResults = results
+        if kind == .anime {
+            animeResults = results.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil }
+            animeError = animeResults.isEmpty ? (failures.first ?? "AniList returned no titles.") : nil
+        } else if kind == nil {
+            animeResults = results.filter { $0.kind == .anime && $0.aniListID != nil && $0.tmdbID == nil }
+            animeError = nil
+        }
+        if results.isEmpty {
+            searchError = failures.first ?? "No titles were found for this catalog."
+        }
+        hasMoreResults = results.count >= 20
+        await holdPlaceholders(since: started, hadContent: hadContent)
+        isSearching = false
+    }
+
     func loadAnimeCatalog() async {
-        guard !isSearching else { return }
-        await search(query: "", kind: .anime)
+        await loadCatalog(kind: .anime)
+    }
+
+    /// Fetches TMDB's official service logos once per launch. Failures are
+    /// ignored so the tiles simply fall back to their monogram/asset logo.
+    func loadProviderLogosIfNeeded() async {
+        guard providerLogos.isEmpty else { return }
+        guard let logos = try? await tmdb.providerLogos(), !logos.isEmpty else { return }
+        providerLogos = logos
     }
 
     func search(query: String, kind: MediaKind? = nil) async {
@@ -250,12 +387,22 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func loadMoreSearchResults() async {
-        guard !isLoadingMore, hasMoreResults, (!activeSearchQuery.isEmpty || activeSearchKind == .anime) else { return }
+        guard !isLoadingMore, hasMoreResults else { return }
         isLoadingMore = true
         searchPage += 1
         var more: [MediaItem] = []
         do {
-            if activeSearchKind == .anime {
+            if activeSearchQuery.isEmpty {
+                // Browsing a catalog rather than running a typed query.
+                if let kind = activeSearchKind, kind != .anime {
+                    more = try await tmdb.popular(kind: kind, page: searchPage)
+                } else {
+                    if activeSearchKind == nil {
+                        more += (try? await tmdb.trending(page: searchPage)) ?? []
+                    }
+                    more += try await anilist.search(query: "", kind: .anime, page: min(catalogAnimeStartPage + searchPage - 1, 240))
+                }
+            } else if activeSearchKind == .anime {
                 more = try await anilist.search(query: activeSearchQuery, kind: .anime, page: searchPage)
             } else if let kind = activeSearchKind {
                 more = try await tmdb.search(query: activeSearchQuery, kind: kind, page: searchPage)
@@ -276,10 +423,139 @@ final class FrostPlayStore: ObservableObject {
         isLoadingMore = false
     }
 
-    func toggleLibrary(_ media: MediaItem) {
-        if let index = library.firstIndex(of: media) { library.remove(at: index) }
-        else { library.insert(media, at: 0) }
+    // MARK: - Lists
+
+    /// The list "Add to My List" targets: the built-in list when it exists.
+    private var defaultCollectionID: String {
+        collections.first(where: { $0.isBuiltIn })?.id ?? collections.first?.id ?? MediaCollection.builtInID
     }
+
+    func collection(id: String) -> MediaCollection? { collections.first { $0.id == id } }
+
+    @discardableResult
+    func createCollection(named name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let collection = MediaCollection(
+            id: UUID().uuidString,
+            name: trimmed.isEmpty ? "New List" : trimmed,
+            artwork: CollectionArtwork(style: settings.listCoverStyle)
+        )
+        collections.append(collection)
+        return collection.id
+    }
+
+    func renameCollection(_ id: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = collections.firstIndex(where: { $0.id == id }) else { return }
+        collections[index].name = trimmed
+    }
+
+    func deleteCollection(_ id: String) {
+        guard let index = collections.firstIndex(where: { $0.id == id }), !collections[index].isBuiltIn else { return }
+        collections.remove(at: index)
+    }
+
+    func setArtworkStyle(_ style: CollectionArtwork.Style, for id: String) {
+        guard let index = collections.firstIndex(where: { $0.id == id }) else { return }
+        collections[index].artwork.style = style
+        // An automatic cover follows the list itself, so any pinned titles go.
+        if style == .automatic { collections[index].artwork.mediaIDs = [] }
+    }
+
+    /// Adds or removes a title from a list's cover, honoring the style's slots.
+    func toggleCoverMedia(_ mediaID: String, for id: String) {
+        guard let index = collections.firstIndex(where: { $0.id == id }) else { return }
+        let slots = max(collections[index].artwork.style.slotCount, 1)
+        var ids = collections[index].artwork.mediaIDs
+        if let position = ids.firstIndex(of: mediaID) {
+            ids.remove(at: position)
+        } else {
+            ids.append(mediaID)
+            if ids.count > slots { ids = Array(ids.suffix(slots)) }
+        }
+        collections[index].artwork.mediaIDs = ids
+    }
+
+    func setCustomArtwork(_ data: Data?, for id: String) {
+        guard let index = collections.firstIndex(where: { $0.id == id }) else { return }
+        collections[index].artwork.customImageData = data
+        if data != nil { collections[index].artwork.style = .custom }
+    }
+
+    /// Resets every cover to the style chosen in Settings → Lists.
+    func resetAllCovers() {
+        for index in collections.indices {
+            collections[index].artwork = CollectionArtwork(style: settings.listCoverStyle)
+        }
+    }
+
+    /// The titles a cover should draw, honoring the list's artwork style.
+    func coverMedia(for collection: MediaCollection) -> [MediaItem] {
+        switch collection.artwork.style {
+        case .custom:
+            return []
+        case .automatic:
+            return Array(collection.items.prefix(4))
+        case .mosaic, .single:
+            let byID = Dictionary(collection.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let chosen = collection.artwork.mediaIDs.compactMap { byID[$0] }
+            guard !chosen.isEmpty else { return Array(collection.items.prefix(4)) }
+            return collection.artwork.style == .single ? Array(chosen.prefix(1)) : Array(chosen.prefix(4))
+        }
+    }
+
+    func reorderCollection(_ id: String, from source: IndexSet, to destination: Int) {
+        guard let index = collections.firstIndex(where: { $0.id == id }) else { return }
+        collections[index].entries.move(fromOffsets: source, toOffset: destination)
+    }
+
+    func add(_ media: MediaItem, to collectionID: String) {
+        guard let index = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        guard !collections[index].contains(media) else { return }
+        collections[index].entries.insert(CollectionEntry(media: media), at: 0)
+    }
+
+    func remove(_ media: MediaItem, from collectionID: String) {
+        guard let index = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        collections[index].entries.removeAll { $0.media.id == media.id }
+    }
+
+    func toggle(_ media: MediaItem, in collectionID: String) {
+        guard let index = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        if collections[index].contains(media) {
+            collections[index].entries.removeAll { $0.media.id == media.id }
+        } else {
+            collections[index].entries.insert(CollectionEntry(media: media), at: 0)
+        }
+    }
+
+    func isSaved(_ media: MediaItem, in collectionID: String) -> Bool {
+        collection(id: collectionID)?.contains(media) ?? false
+    }
+
+    /// Renames a title inside one list only. `nil` restores its real name.
+    func setAlias(_ alias: String?, for mediaID: String, in collectionID: String) {
+        guard let index = collections.firstIndex(where: { $0.id == collectionID }),
+              let entryIndex = collections[index].entries.firstIndex(where: { $0.media.id == mediaID }) else { return }
+        let trimmed = alias?.trimmingCharacters(in: .whitespacesAndNewlines)
+        collections[index].entries[entryIndex].alias = (trimmed?.isEmpty ?? true) ? nil : trimmed
+    }
+
+    func collectionsContaining(_ media: MediaItem) -> [MediaCollection] {
+        collections.filter { $0.contains(media) }
+    }
+
+    /// Short "where is this saved" line used by the detail screen's list button.
+    func librarySummary(for media: MediaItem) -> String {
+        let names = collectionsContaining(media).map(\.name)
+        switch names.count {
+        case 0: return "Save for later"
+        case 1: return "In \(names[0])"
+        default: return "In \(names.count) lists"
+        }
+    }
+
+    func toggleLibrary(_ media: MediaItem) { toggle(media, in: defaultCollectionID) }
 
     func isInLibrary(_ media: MediaItem) -> Bool { library.contains(media) }
 
@@ -322,14 +598,9 @@ final class FrostPlayStore: ObservableObject {
         history.removeAll()
     }
 
-    func addToLibrary(_ media: MediaItem) {
-        guard !library.contains(media) else { return }
-        library.insert(media, at: 0)
-    }
+    func addToLibrary(_ media: MediaItem) { add(media, to: defaultCollectionID) }
 
-    func removeFromLibrary(_ media: MediaItem) {
-        library.removeAll { $0 == media }
-    }
+    func removeFromLibrary(_ media: MediaItem) { remove(media, from: defaultCollectionID) }
 
     func moveSource(from source: IndexSet, to destination: Int) {
         settings.enabledSources.move(fromOffsets: source, toOffset: destination)
@@ -411,7 +682,8 @@ final class FrostPlayStore: ObservableObject {
             .networkAndImages: urlCacheBytes,
             .webKit: fileBytes.0,
             .temporaryFiles: max(0, fileBytes.1 + fileBytes.2 - URLCache.shared.currentDiskUsage),
-            .animeCatalog: await AnikotoCache.cachedByteCount()
+            .animeCatalog: await AnikotoCache.cachedByteCount(),
+            .episodeDetails: await KitsuCacheInfo.approximateByteCount()
         ]
     }
 
@@ -419,6 +691,7 @@ final class FrostPlayStore: ObservableObject {
         // Keep removal scoped to transient caches so Documents/downloads and Library/preferences survive.
         URLCache.shared.removeAllCachedResponses()
         await AnikotoCache.clear()
+        await KitsuCacheInfo.clear()
         await withCheckedContinuation { continuation in
             WKWebsiteDataStore.default().removeData(
                 ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
@@ -448,5 +721,21 @@ final class FrostPlayStore: ObservableObject {
     private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
+    }
+
+    /// Restores the saved lists, migrating the pre-multi-list single "library"
+    /// value into the built-in list the first time the app runs after the update.
+    private static func restoredCollections() -> [MediaCollection] {
+        if let stored = load([MediaCollection].self, key: "collections"), !stored.isEmpty {
+            var restored = stored
+            if !restored.contains(where: { $0.isBuiltIn }) {
+                restored.insert(MediaCollection.builtIn, at: 0)
+            }
+            return restored
+        }
+        let legacy = load([MediaItem].self, key: "library") ?? []
+        var builtIn = MediaCollection.builtIn
+        builtIn.entries = legacy.map { CollectionEntry(media: $0) }
+        return [builtIn]
     }
 }

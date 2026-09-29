@@ -31,11 +31,83 @@ struct AppearanceSettingsView: View {
                 SliderRow(title: "Background blur", value: $store.settings.backgroundBlur, range: 0...32, suffix: "\(Int(store.settings.backgroundBlur))")
                 SliderRow(title: "Line spacing", value: $store.settings.lineSpacing, range: 1...2, suffix: "\(Int(store.settings.lineSpacing * 100))%")
             }
+            Section("Loading") {
+                Toggle("Loading placeholders", isOn: $store.settings.showLoadingPlaceholders)
+                SliderRow(
+                    title: "Minimum time",
+                    value: $store.settings.minimumPlaceholderSeconds,
+                    range: 0...3,
+                    suffix: String(format: "%.1f s", store.settings.minimumPlaceholderSeconds)
+                )
+                .disabled(!store.settings.showLoadingPlaceholders)
+                Text("Placeholders stay up for at least this long on a first load, so content never flashes in and out. Later refreshes resolve as fast as the network allows.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .listRowBackground(frostPanel)
+            Section("Library") {
+                NavigationLink { LibrarySettingsView() } label: {
+                    Label("Lists & covers", systemImage: "rectangle.stack")
+                }
+                Text("Cover style for new lists, per-list title names, and deletion behaviour.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             .listRowBackground(frostPanel)
         }
         .navigationTitle("Appearance")
         .scrollContentBackground(.hidden)
         .background(frostBackground)
+    }
+}
+
+/// Settings for the multi-list Library: default covers, counts, per-list names,
+/// and deletion behaviour.
+struct LibrarySettingsView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    @State private var showingResetConfirmation = false
+
+    var body: some View {
+        Form {
+            Section("New lists") {
+                Picker("Default cover", selection: $store.settings.listCoverStyle) {
+                    ForEach(CollectionArtwork.Style.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+                Text("Applied to every list you create from now on. Any list's cover can still be changed from the Library tab.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Covers") {
+                Toggle("Show title counts", isOn: $store.settings.showListCounts)
+                Toggle("Use per-list names", isOn: $store.settings.showListAliases)
+                Text("A per-list name only changes a title inside that one list. Everywhere else keeps the real title.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(role: .destructive) {
+                    showingResetConfirmation = true
+                } label: {
+                    Label("Reset all covers", systemImage: "arrow.counterclockwise")
+                }
+            }
+            Section("Lists") {
+                Toggle("Confirm before deleting", isOn: $store.settings.confirmListDeletion)
+                ForEach(store.collections) { collection in
+                    Label(collection.name, systemImage: collection.isBuiltIn ? "bookmark.fill" : "rectangle.stack")
+                }
+            }
+        }
+        .listRowBackground(frostPanel)
+        .navigationTitle("Lists & covers")
+        .scrollContentBackground(.hidden)
+        .background(frostBackground)
+        .confirmationDialog("Reset every list cover?", isPresented: $showingResetConfirmation, titleVisibility: .visible) {
+            Button("Reset covers", role: .destructive) { store.resetAllCovers() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Custom photos and chosen titles are removed. Your lists and their titles stay.")
+        }
     }
 }
 
@@ -106,6 +178,18 @@ struct CatalogSettingsView: View {
                 SecureField("TMDB API key", text: $store.settings.tmdbAPIKey).textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.password)
                 Label(store.isTMDBConfigured ? "Connected" : "Not connected", systemImage: store.isTMDBConfigured ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(store.isTMDBConfigured ? .green : .orange)
                 Text("Stored locally on this device. Changes apply to the next search or catalog refresh.").font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Home") {
+                Toggle("Rotate Home picks", isOn: $store.settings.rotateHomeCatalog)
+                Text("Home shows a different trending or popular feed on every visit, instead of the same row of titles. The current feed is named above its rail.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Anime episode details") {
+                Toggle("Kitsu episode details", isOn: $store.settings.kitsuEpisodeDetails)
+                Text("Adds Kitsu's per-episode titles, synopses, air dates, and artwork to the episode list. AniList still owns the numbering and the MegaPlay playback URLs, so turning this off never removes episodes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Catalog & API")

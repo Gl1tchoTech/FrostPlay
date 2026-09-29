@@ -102,6 +102,166 @@ struct DownloadEntry: Identifiable, Codable, Hashable {
     let episode: Int?
 }
 
+/// One saved title inside a list. `alias` is a per-list display name, so renaming
+/// a title inside a list never changes it anywhere else in the app.
+struct CollectionEntry: Identifiable, Hashable, Codable {
+    let media: MediaItem
+    /// Per-list display name. `nil` means "show the title's real name".
+    var alias: String?
+    var addedAt: Date
+
+    var id: String { media.id }
+
+    /// The name this entry shows inside its own list.
+    var displayTitle: String {
+        guard let alias, !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return media.title }
+        return alias
+    }
+
+    /// True when the entry carries a name that only exists inside its list.
+    var isRenamed: Bool {
+        alias?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    init(media: MediaItem, alias: String? = nil, addedAt: Date = Date()) {
+        self.media = media
+        self.alias = alias
+        self.addedAt = addedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        media = try container.decode(MediaItem.self, forKey: .media)
+        alias = try container.decodeIfPresent(String.self, forKey: .alias)
+        addedAt = try container.decodeIfPresent(Date.self, forKey: .addedAt) ?? Date()
+    }
+}
+
+/// How a list's cover is drawn. `mediaIDs` powers the "four titles" and "one
+/// title" styles, `customImageData` the picked-photo style.
+struct CollectionArtwork: Hashable, Codable {
+    enum Style: String, Codable, CaseIterable, Identifiable {
+        /// The first four titles currently in the list.
+        case automatic
+        /// Up to four titles the user picked, in the order they picked them.
+        case mosaic
+        /// A single title the user picked.
+        case single
+        /// A photo the user picked from their library.
+        case custom
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .automatic: return "Automatic"
+            case .mosaic: return "Four titles"
+            case .single: return "One title"
+            case .custom: return "Custom image"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .automatic: return "The first four titles you save"
+            case .mosaic: return "Pick up to four titles to show"
+            case .single: return "Pick one title to fill the cover"
+            case .custom: return "Choose a photo from your library"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .automatic: return "wand.and.stars"
+            case .mosaic: return "square.grid.2x2"
+            case .single: return "rectangle.portrait"
+            case .custom: return "photo"
+            }
+        }
+
+        /// How many titles this style can draw at once.
+        var slotCount: Int {
+            switch self {
+            case .mosaic: return 4
+            case .single: return 1
+            case .automatic, .custom: return 0
+            }
+        }
+    }
+
+    var style: Style
+    /// Titles used by the `.mosaic` and `.single` styles, in display order.
+    var mediaIDs: [String]
+    /// Downscaled JPEG data backing the `.custom` style.
+    var customImageData: Data?
+
+    init(style: Style = .automatic, mediaIDs: [String] = [], customImageData: Data? = nil) {
+        self.style = style
+        self.mediaIDs = mediaIDs
+        self.customImageData = customImageData
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        style = try container.decodeIfPresent(Style.self, forKey: .style) ?? .automatic
+        mediaIDs = try container.decodeIfPresent([String].self, forKey: .mediaIDs) ?? []
+        customImageData = try container.decodeIfPresent(Data.self, forKey: .customImageData)
+    }
+}
+
+/// A user-made list. FrostPlay always keeps at least one (the built-in
+/// "My List", which "Add to My List" targets); the rest are created, renamed,
+/// re-covered, and deleted by the user.
+struct MediaCollection: Identifiable, Hashable, Codable {
+    static let builtInID = "my-list"
+
+    var id: String
+    var name: String
+    var subtitle: String?
+    var entries: [CollectionEntry]
+    var artwork: CollectionArtwork
+    var createdAt: Date
+    /// The built-in list cannot be deleted.
+    var isBuiltIn: Bool
+
+    static var builtIn: MediaCollection {
+        MediaCollection(id: builtInID, name: "My List", entries: [], createdAt: Date(), isBuiltIn: true)
+    }
+
+    var items: [MediaItem] { entries.map(\.media) }
+
+    func contains(_ media: MediaItem) -> Bool { entries.contains { $0.media.id == media.id } }
+
+    init(
+        id: String,
+        name: String,
+        subtitle: String? = nil,
+        entries: [CollectionEntry] = [],
+        artwork: CollectionArtwork = CollectionArtwork(),
+        createdAt: Date = Date(),
+        isBuiltIn: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.subtitle = subtitle
+        self.entries = entries
+        self.artwork = artwork
+        self.createdAt = createdAt
+        self.isBuiltIn = isBuiltIn
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        subtitle = try container.decodeIfPresent(String.self, forKey: .subtitle)
+        entries = try container.decodeIfPresent([CollectionEntry].self, forKey: .entries) ?? []
+        artwork = try container.decodeIfPresent(CollectionArtwork.self, forKey: .artwork) ?? CollectionArtwork()
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        isBuiltIn = try container.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
+    }
+}
+
 struct EpisodeInfo: Identifiable, Hashable, Codable {
     let number: Int
     let name: String
@@ -206,8 +366,42 @@ struct FrostPlaySettings: Codable {
     var homeSections: [HomeSection] = HomeSection.defaultOrder
     var downloadsEnabled = true
 
+    // MARK: Lists
+
+    /// Cover style applied to newly created lists.
+    var listCoverStyle: CollectionArtwork.Style = .automatic
+    /// Shows the saved-title count on each list's cover.
+    var showListCounts = true
+    /// Shows per-list renamed titles inside a list instead of the real title.
+    var showListAliases = true
+    /// Asks before deleting a list.
+    var confirmListDeletion = true
+
+    // MARK: Loading
+
+    /// Shows shimmering placeholders while a surface loads.
+    var showLoadingPlaceholders = true
+    /// How long the placeholders stay up on a first load, even when the network
+    /// answers instantly, so content never flashes in and out.
+    var minimumPlaceholderSeconds = 1.2
+
+    // MARK: Home
+
+    /// Picks a different Home feed on every visit instead of the same row.
+    var rotateHomeCatalog = true
+
+    // MARK: Anime metadata
+
+    /// Fills AniList's episode rows with Kitsu's per-episode titles, synopses,
+    /// air dates, and artwork. AniList stays authoritative for numbering.
+    var kitsuEpisodeDetails = true
+
     enum CodingKeys: String, CodingKey {
         case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, defaultAnimeSource, defaultMovieTVSource, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
+        case listCoverStyle, showListCounts, showListAliases, confirmListDeletion
+        case showLoadingPlaceholders, minimumPlaceholderSeconds
+        case rotateHomeCatalog
+        case kitsuEpisodeDetails
     }
 
     /// The source that should be tried first for a title type, always guaranteed to
@@ -248,6 +442,14 @@ struct FrostPlaySettings: Codable {
         subtitleColor = try container.decodeIfPresent(String.self, forKey: .subtitleColor) ?? defaults.subtitleColor
         homeSections = try container.decodeIfPresent([HomeSection].self, forKey: .homeSections) ?? defaults.homeSections
         downloadsEnabled = try container.decodeIfPresent(Bool.self, forKey: .downloadsEnabled) ?? defaults.downloadsEnabled
+        listCoverStyle = try container.decodeIfPresent(CollectionArtwork.Style.self, forKey: .listCoverStyle) ?? defaults.listCoverStyle
+        showListCounts = try container.decodeIfPresent(Bool.self, forKey: .showListCounts) ?? defaults.showListCounts
+        showListAliases = try container.decodeIfPresent(Bool.self, forKey: .showListAliases) ?? defaults.showListAliases
+        confirmListDeletion = try container.decodeIfPresent(Bool.self, forKey: .confirmListDeletion) ?? defaults.confirmListDeletion
+        showLoadingPlaceholders = try container.decodeIfPresent(Bool.self, forKey: .showLoadingPlaceholders) ?? defaults.showLoadingPlaceholders
+        minimumPlaceholderSeconds = try container.decodeIfPresent(Double.self, forKey: .minimumPlaceholderSeconds) ?? defaults.minimumPlaceholderSeconds
+        rotateHomeCatalog = try container.decodeIfPresent(Bool.self, forKey: .rotateHomeCatalog) ?? defaults.rotateHomeCatalog
+        kitsuEpisodeDetails = try container.decodeIfPresent(Bool.self, forKey: .kitsuEpisodeDetails) ?? defaults.kitsuEpisodeDetails
     }
 }
 

@@ -1,6 +1,8 @@
 import SwiftUI
 
-// File-private copy of the shared accent so this file can stand on its own.
+// File-private copies of the shared palette so this file can stand on its own.
+private let frostBackground = Color(red: 0.025, green: 0.025, blue: 0.03)
+private let frostPanel = Color.white.opacity(0.075)
 private let frostOrange = Color.orange
 
 // MARK: - Press feedback
@@ -212,10 +214,21 @@ struct MediaContextMenu: View {
         Button { onPlay() } label: {
             Label(media.kind == .anime ? "Play first episode" : "Play", systemImage: "play.fill")
         }
-        Button { store.toggleLibrary(media) } label: {
+        Menu {
+            ForEach(store.collections) { collection in
+                Button {
+                    store.toggle(media, in: collection.id)
+                } label: {
+                    Label(
+                        collection.name,
+                        systemImage: store.isSaved(media, in: collection.id) ? "checkmark.circle.fill" : "circle"
+                    )
+                }
+            }
+        } label: {
             Label(
-                store.isInLibrary(media) ? "Remove from My List" : "Add to My List",
-                systemImage: store.isInLibrary(media) ? "bookmark.slash" : "bookmark"
+                store.isInLibrary(media) ? "Saved in your lists" : "Add to list",
+                systemImage: store.isInLibrary(media) ? "bookmark.fill" : "bookmark"
             )
         }
         if store.isInHistory(media) {
@@ -261,92 +274,8 @@ struct MediaLink<Label: View>: View {
 
 // MARK: - On-Home section editor
 
-/// One reorderable/removable Home section, shown while Home is in edit mode.
-struct EditableHomeSectionCard: View {
-    @EnvironmentObject private var store: FrostPlayStore
-    let section: HomeSection
-    @State private var isTargeted = false
-
-    private var index: Int? { store.settings.homeSections.firstIndex(of: section) }
-    private var canMoveUp: Bool { (index ?? 0) > 0 }
-    private var canMoveDown: Bool {
-        guard let position = index else { return false }
-        return position < store.settings.homeSections.count - 1
-    }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: section.symbolName)
-                .font(.subheadline)
-                .foregroundStyle(frostOrange)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(frostOrange.opacity(0.16)))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(section.title).font(.headline).foregroundStyle(.white)
-                Text(section.subtitle).font(.caption).foregroundStyle(.white.opacity(0.55))
-            }
-            Spacer(minLength: 0)
-            VStack(spacing: 4) {
-                Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { store.nudgeHomeSection(section, by: -1) }
-                } label: {
-                    Image(systemName: "chevron.up").font(.caption2.bold())
-                        .foregroundStyle(.white.opacity(canMoveUp ? 0.7 : 0.18))
-                }
-                .disabled(!canMoveUp)
-                Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { store.nudgeHomeSection(section, by: 1) }
-                } label: {
-                    Image(systemName: "chevron.down").font(.caption2.bold())
-                        .foregroundStyle(.white.opacity(canMoveDown ? 0.7 : 0.18))
-                }
-                .disabled(!canMoveDown)
-            }
-            .buttonStyle(FrostPressStyle())
-            Image(systemName: "line.3.horizontal")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.white.opacity(0.42))
-                .padding(.trailing, 2)
-            Button {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                    store.removeHomeSection(section)
-                }
-            } label: {
-                Image(systemName: "minus.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(Color.red.opacity(0.85))
-            }
-            .buttonStyle(FrostPressStyle())
-            .accessibilityLabel("Remove \(section.title)")
-        }
-        .padding(13)
-        .frostGlass(cornerRadius: 16, highlighted: isTargeted, opacity: 0.9)
-        .draggable(section.rawValue) {
-            HStack(spacing: 8) {
-                Image(systemName: section.symbolName)
-                Text(section.title).font(.subheadline.weight(.bold))
-            }
-            .foregroundStyle(.black)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(frostOrange)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-        .dropDestination(for: String.self) { payloads, _ in
-            guard let raw = payloads.first, let dragged = HomeSection(rawValue: raw) else { return false }
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                store.moveHomeSection(dragged, before: section)
-            }
-            return true
-        } isTargeted: { targeted in
-            isTargeted = targeted
-        }
-        .accessibilityHint("Drag to reorder this section")
-    }
-}
-
-/// The interactive Home editor: reorder by dragging, remove with −, and add any
-/// hidden section back. Lives on the Home screen itself.
+/// The interactive Home editor's add tray. Reordering and removal happen
+/// directly on the live Home rails (see `HomeView.sectionContainer`).
 struct HomeSectionsEditor: View {
     @EnvironmentObject private var store: FrostPlayStore
 
@@ -360,7 +289,7 @@ struct HomeSectionsEditor: View {
                 Image(systemName: "hand.draw.fill").foregroundStyle(frostOrange)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Editing Home").font(.subheadline.bold()).foregroundStyle(.white)
-                    Text("Long-press a section and drag it to reorder, or use the arrows. Tap − to remove it.")
+                    Text("Long-press a rail's drag bar, then drop it on another rail to reorder. − removes it.")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.6))
                         .fixedSize(horizontal: false, vertical: true)
@@ -407,5 +336,215 @@ struct HomeSectionsEditor: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frostGlass(cornerRadius: 18)
+    }
+}
+
+// MARK: - Loading placeholders
+
+/// A shimmering placeholder block. It deliberately mirrors the shape of the
+/// content it replaces, so the layout never jumps when the real data arrives.
+struct FrostShimmer: View {
+    @EnvironmentObject private var store: FrostPlayStore
+
+    var cornerRadius: CGFloat = 14
+    @State private var sweep: CGFloat = -1
+
+    private var isAnimated: Bool {
+        !store.settings.reduceMotion && store.settings.showLoadingPlaceholders
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Color.white.opacity(0.07))
+            .overlay {
+                GeometryReader { proxy in
+                    LinearGradient(
+                        colors: [Color.clear, Color.white.opacity(0.16), Color.clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: max(proxy.size.width * 0.55, 1))
+                    .offset(x: sweep * proxy.size.width * 1.5)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.05), lineWidth: 1)
+            }
+            .onAppear {
+                guard isAnimated, sweep < 0 else { return }
+                withAnimation(.linear(duration: 1.3).repeatForever(autoreverses: false)) {
+                    sweep = 1
+                }
+            }
+    }
+}
+
+/// Placeholder for a horizontal rail: a heading bar plus a row of poster cards.
+struct SkeletonRail: View {
+    var cardCount = 4
+    var cardWidth: CGFloat = 106
+    var cardHeight: CGFloat = 150
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FrostShimmer(cornerRadius: 6).frame(width: 132, height: 18)
+            HStack(spacing: 12) {
+                ForEach(0..<cardCount, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 7) {
+                        FrostShimmer().frame(width: cardWidth, height: cardHeight)
+                        FrostShimmer(cornerRadius: 5).frame(width: cardWidth * 0.78, height: 11)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+/// Placeholder for a poster grid.
+struct SkeletonGrid: View {
+    var count = 6
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 18) {
+            ForEach(0..<count, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 7) {
+                    FrostShimmer().frame(height: 220)
+                    FrostShimmer(cornerRadius: 5).frame(height: 12)
+                    FrostShimmer(cornerRadius: 5).frame(width: 96, height: 10)
+                }
+            }
+        }
+    }
+}
+
+/// Placeholder for the Home hero card.
+struct SkeletonHero: View {
+    var body: some View {
+        FrostShimmer(cornerRadius: 22)
+            .frame(maxWidth: .infinity)
+            .frame(height: 255)
+    }
+}
+
+/// Placeholder rows for a detail screen's episode list.
+struct SkeletonEpisodeRows: View {
+    var count = 5
+
+    var body: some View {
+        VStack(spacing: 9) {
+            ForEach(0..<count, id: \.self) { _ in
+                HStack(spacing: 11) {
+                    FrostShimmer(cornerRadius: 12).frame(width: 48, height: 40)
+                    VStack(alignment: .leading, spacing: 6) {
+                        FrostShimmer(cornerRadius: 5).frame(height: 11)
+                        FrostShimmer(cornerRadius: 5).frame(width: 140, height: 9)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(11)
+                .background(Color.white.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
+        }
+    }
+}
+
+extension View {
+    /// Cross-fades a placeholder into real content without bouncing the layout.
+    func frostSwapTransition(reduceMotion: Bool) -> some View {
+        transition(reduceMotion ? .identity : .opacity)
+    }
+}
+
+// MARK: - Adding titles to a list
+
+/// Adds titles to a list from everything FrostPlay already knows about: watch
+/// history and the other lists. Titles found while browsing are added from any
+/// title's long-press menu instead.
+struct CollectionAddTitlesSheet: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    let collectionID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var collection: MediaCollection? { store.collection(id: collectionID) }
+
+    /// De-duplicated candidates, minus the titles this list already holds.
+    private var candidates: [MediaItem] {
+        var seen = Set<String>()
+        let known = store.history.map(\.media) + store.collections.flatMap(\.items)
+        let unique = known.filter { seen.insert($0.id).inserted }
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return unique.filter { media in
+            guard let collection, !collection.contains(media) else { return false }
+            guard !clean.isEmpty else { return true }
+            return media.title.lowercased().contains(clean)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.white.opacity(0.55))
+                        TextField("Filter titles", text: $query)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.45))
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(frostPanel)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    if candidates.isEmpty {
+                        ContentUnavailableView(
+                            "Nothing to add",
+                            systemImage: "text.badge.plus",
+                            description: Text("Titles you watch or save to other lists show up here. Any title can also be added from its long-press menu.")
+                        )
+                    } else {
+                        LazyVStack(spacing: 10) {
+                            ForEach(candidates) { media in
+                                Button {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                                        store.add(media, to: collectionID)
+                                    }
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Poster(url: media.posterURL, width: 50, height: 72)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(media.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1).truncationMode(.tail)
+                                            Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).font(.caption2).foregroundStyle(.white.opacity(0.55))
+                                        }
+                                        Spacer(minLength: 0)
+                                        Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(frostOrange)
+                                    }
+                                    .padding(11)
+                                    .frostGlass(cornerRadius: 16, opacity: 0.85)
+                                }
+                                .buttonStyle(FrostPressStyle(scale: 0.985))
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .padding(.bottom, 40)
+            }
+            .background(frostBackground.ignoresSafeArea())
+            .navigationTitle("Add titles")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.large])
+        .presentationBackground(frostBackground)
+        .preferredColorScheme(.dark)
     }
 }
