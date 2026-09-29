@@ -8,6 +8,43 @@ struct ResolvedPlayback {
     let format: PlaybackFormat
 }
 
+/// The hosts FrostPlay is allowed to load inside the in-app player, one per
+/// implemented source: MegaPlay (anime), VidLink and MoviesAPI (movies/TV).
+///
+/// The web view is source-agnostic, so this allowlist — not MegaPlay alone —
+/// decides what may render. Checking every embed against megaplay.buzz rejected
+/// each VidLink/MoviesAPI movie and TV embed and blamed MegaPlay for it.
+enum EmbedURL {
+    static let trustedHosts = ["megaplay.buzz", "vidlink.pro", "moviesapi.to"]
+
+    static func validated(_ url: URL?) -> URL? {
+        guard let url,
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else { return nil }
+        let trusted = trustedHosts.contains(host)
+            || trustedHosts.contains { host.hasSuffix(".\($0)") }
+        return trusted ? url : nil
+    }
+
+    /// True when a resolved format can actually play: direct streams always can,
+    /// embeds only from a trusted source host.
+    static func isPlayable(_ format: PlaybackFormat) -> Bool {
+        switch format {
+        case .embed(let url): return validated(url) != nil
+        case .hls, .mp4: return true
+        }
+    }
+
+    /// The source an embed belongs to, so the player can name the right one.
+    static func source(hosting url: URL) -> PlaybackSource? {
+        guard let host = url.host?.lowercased() else { return nil }
+        if host == "megaplay.buzz" || host.hasSuffix(".megaplay.buzz") { return .megaPlay }
+        if host == "vidlink.pro" || host.hasSuffix(".vidlink.pro") { return .vidLink }
+        if host == "moviesapi.to" || host.hasSuffix(".moviesapi.to") { return .moviesAPI }
+        return nil
+    }
+}
+
 struct PlaybackResolver {
     private let adapters: [PlaybackSourceAdapter] = [VidLinkAdapter(), MegaPlayAdapter(), MoviesAPIAdapter()]
 
@@ -50,9 +87,9 @@ struct PlaybackResolver {
         for source in ordered {
             guard allowed.contains(source), source.supports.contains(media.kind) else { continue }
             guard let adapter = adapters.first(where: { $0.source == source }) else { continue }
-            if let result = adapter.playback(for: media, season: season, episode: episode, language: settings.preferredAnimeLanguage) {
-                return ResolvedPlayback(source: source, format: result)
-            }
+            guard let result = adapter.playback(for: media, season: season, episode: episode, language: settings.preferredAnimeLanguage),
+                  EmbedURL.isPlayable(result) else { continue }
+            return ResolvedPlayback(source: source, format: result)
         }
         return nil
     }
@@ -71,9 +108,10 @@ struct PlaybackResolver {
 
 struct HybridPlayer: View {
     let format: PlaybackFormat
+    var source: PlaybackSource? = nil
     var body: some View {
         switch format {
-        case .embed(let url): EmbedPlayer(url: url)
+        case .embed(let url): EmbedPlayer(url: url, source: source ?? EmbedURL.source(hosting: url))
         case .hls(let url), .mp4(let url): DirectVideoPlayer(url: url)
         }
     }
@@ -116,6 +154,14 @@ struct DirectVideoPlayer: View {
 
 struct EmbedPlayer: UIViewRepresentable {
     let url: URL
+    var source: PlaybackSource? = nil
+
+    /// Remembers which embed is mounted so a different source reloads the player.
+    final class Coordinator {
+        var loadedURL: URL?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -126,18 +172,22 @@ struct EmbedPlayer: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
-        loadEmbed(in: webView)
+        loadEmbed(in: webView, coordinator: context.coordinator)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        guard webView.url == nil else { return }
-        loadEmbed(in: webView)
+        // Reload when the resolved source changes (the in-player source picker)
+        // instead of keeping whatever embed was mounted first.
+        guard context.coordinator.loadedURL != url else { return }
+        loadEmbed(in: webView, coordinator: context.coordinator)
     }
 
-    private func loadEmbed(in webView: WKWebView) {
-        guard let trustedURL = MegaPlayURL.validated(url) else {
-            webView.loadHTMLString("<html><body style='margin:0;background:#000;color:#fff;font:16px -apple-system;display:grid;place-items:center;height:100vh'>Invalid MegaPlay embed URL</body></html>", baseURL: nil)
+    private func loadEmbed(in webView: WKWebView, coordinator: Coordinator) {
+        coordinator.loadedURL = url
+        guard let trustedURL = EmbedURL.validated(url) else {
+            let label = source.map { "\($0.rawValue) embed" } ?? "This embed"
+            webView.loadHTMLString("<html><body style='margin:0;background:#000;color:#fff;font:16px -apple-system;display:grid;place-items:center;height:100vh;text-align:center;padding:24px'>\(label) could not be loaded: unsupported source host</body></html>", baseURL: nil)
             return
         }
         let iframeURL = trustedURL.absoluteString
@@ -148,7 +198,8 @@ struct EmbedPlayer: UIViewRepresentable {
         let html = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}iframe{border:0;width:100%;height:100%;display:block}</style></head><body><iframe src="\(iframeURL)" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen referrerpolicy="origin"></iframe></body></html>
         """
-        webView.loadHTMLString(html, baseURL: URL(string: "https://megaplay.buzz/"))
+        // The embed's own origin, so each source keeps its referrer rules.
+        webView.loadHTMLString(html, baseURL: trustedURL)
     }
 }
 

@@ -1917,7 +1917,7 @@ struct PlayerView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredPlaybackURL) {
-                HybridPlayer(format: format).frame(maxHeight: .infinity)
+                HybridPlayer(format: format, source: resolvedPlayback?.source).frame(maxHeight: .infinity)
                 if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
                     Button { Task { try? await store.download(media: media, format: format, episode: media.kind == .movie ? nil : episode) } } label: {
                         FrostActionLabel(title: "Download MP4", systemImage: "arrow.down.circle.fill", subtitle: "Save this file for offline playback", prominent: true)
