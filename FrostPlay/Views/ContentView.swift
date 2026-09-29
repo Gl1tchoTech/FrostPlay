@@ -178,7 +178,7 @@ struct HomeView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frostGlass(cornerRadius: 20, opacity: 0.85, highlighted: targetedSection == section)
+        .frostGlass(cornerRadius: 20, highlighted: targetedSection == section, opacity: 0.85)
         .dropDestination(for: String.self) { payloads, _ in
             guard let raw = payloads.first, let dragged = HomeSection(rawValue: raw) else { return false }
             withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
