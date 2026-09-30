@@ -1362,6 +1362,7 @@ struct SettingsView: View {
                 NavigationLink { AppearanceSettingsView() } label: { SettingsRow(icon: "paintpalette", title: "Appearance", subtitle: "Artwork, blur, text, and motion") }
                 NavigationLink { PlaybackSettingsView() } label: { SettingsRow(icon: "play.rectangle", title: "Playback", subtitle: "Quality, autoplay, subtitles, and sources") }
                 NavigationLink { EpisodeMetadataSettingsView() } label: { SettingsRow(icon: "list.bullet.rectangle", title: "Episodes", subtitle: "Autoplay, watched state, and episode edits") }
+                NavigationLink { AIMetadataSettingsView() } label: { SettingsRow(icon: "sparkles", title: "AI metadata", subtitle: store.isAIConfigured ? "Model connected" : "Fill in missing metadata with your own key") }
                 NavigationLink { SubtitleSettingsView() } label: { SettingsRow(icon: "captions.bubble", title: "Subtitles", subtitle: "Native player, color, and sizing") }
                 NavigationLink { CatalogSettingsView() } label: { SettingsRow(icon: "key", title: "Catalog & API", subtitle: store.isTMDBConfigured ? "TMDB connected" : "TMDB key required") }
                 NavigationLink { SourceSettingsView() } label: { SettingsRow(icon: "arrow.triangle.2.circlepath", title: "Sources", subtitle: "Priority and availability") }
@@ -1517,6 +1518,14 @@ struct DetailView: View {
         media.kind == .movie || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() == "MOVIE")
     }
     private var currentSource: PlaybackSource { store.settings.defaultSource(for: media.kind) }
+    private var metadataSourceBadge: String {
+        media.kind == .anime ? store.metadataSource(for: media).title : "TMDB"
+    }
+    /// Reloads the title when the metadata source changes, so switching to or
+    /// away from the fallback chain refreshes only this title.
+    private var metadataTaskKey: String {
+        "\(media.id)-\(store.metadataSource(for: media).rawValue)"
+    }
 
     /// Where "Play" resumes: the episode the title was last on, or episode one.
     private var startPosition: EpisodeSequencer.Position {
@@ -1549,7 +1558,7 @@ struct DetailView: View {
                     .foregroundStyle(.white)
                 Text(media.kind.title + (media.year.map { " · \($0)" } ?? "")).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    DetailBadge(label: media.kind == .anime ? "AniList" : "TMDB", icon: "checkmark.seal.fill")
+                    DetailBadge(label: metadataSourceBadge, icon: "checkmark.seal.fill")
                     if let episodeCount = media.episodeCount, episodeCount > 0,
                        media.kind != .anime || (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() != "MOVIE" {
                         DetailBadge(label: "\(episodeCount) episodes", icon: "list.number")
@@ -1557,6 +1566,22 @@ struct DetailView: View {
                     if let source = media.providerNames.first {
                         DetailBadge(label: source, icon: "play.circle.fill")
                     }
+                }
+                if media.kind == .anime {
+                    Button {
+                        store.toggleMetadataSource(for: media)
+                    } label: {
+                        FrostActionLabel(
+                            title: "Metadata: \(store.metadataSource(for: media).title)",
+                            systemImage: "arrow.left.arrow.right",
+                            subtitle: store.metadataSource(for: media) == .fallback
+                                ? "Jikan + AniDB · tap to use AniList"
+                                : "AniList · tap to use the fallback chain",
+                            trailingChevron: true
+                        )
+                    }
+                    .buttonStyle(FrostPressStyle())
+                    .accessibilityLabel("Switch metadata source. Currently \(store.metadataSource(for: media).title)")
                 }
                 if media.kind == .anime, isLoadingAnimeMetadata, (refreshedAnimeMetadata ?? media.metadata)?.hasDetails != true {
                     ProgressView("Loading AniList details…")
@@ -1650,7 +1675,7 @@ struct DetailView: View {
         .navigationTitle(media.title)
         .navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark)
-        .task(id: media.id) {
+        .task(id: metadataTaskKey) {
             guard media.kind == .anime else { return }
             isLoadingAnimeMetadata = true
             refreshedAnimeMetadata = await store.animeMetadata(for: media)
@@ -1692,8 +1717,17 @@ struct EpisodePanel: View {
     @State private var streamError: String?
     @State private var playingEpisode: EpisodeInfo?
     @State private var editingEpisode: EpisodeInfo?
+    @State private var isGeneratingMetadata = false
+    @State private var metadataError: String?
+    @State private var generatedCount: Int?
 
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
+
+    /// Reloads the catalog when this title's metadata source changes, so the
+    /// fallback chain repopulates this season without touching other titles.
+    private var catalogReloadKey: String {
+        "\(media.id)-\(store.metadataSource(for: media).rawValue)"
+    }
 
     /// The rows the providers produced, one per episode the season actually has,
     /// with the resolved MegaPlay URL folded in but the user's own edits not yet
@@ -1729,6 +1763,30 @@ struct EpisodePanel: View {
         var updated = currentSeason
         updated.episodes = providerEpisodes
         return seasons.map { $0.season == selectedSeason ? updated : $0 }
+    }
+
+    /// Shown when something in this season is actually missing, so the button
+    /// never appears for a fully populated list.
+    private var showSeasonMetadataTools: Bool {
+        !providerEpisodes.isEmpty && providerEpisodes.contains { $0.hasNoDetails }
+    }
+
+    /// Runs the configured model over this season and stores the answer through
+    /// the same override mechanism the manual editor uses.
+    private func generateSeasonMetadata() async {
+        isGeneratingMetadata = true
+        metadataError = nil
+        generatedCount = nil
+        do {
+            generatedCount = try await store.generateSeasonMetadata(
+                media: media,
+                season: selectedSeason,
+                episodes: providerEpisodes
+            )
+        } catch {
+            metadataError = error.localizedDescription
+        }
+        isGeneratingMetadata = false
     }
 
     private func loadAnimeStreams() async { // resolves MegaPlay URLs for anime episodes
@@ -1785,6 +1843,45 @@ struct EpisodePanel: View {
                 .pickerStyle(.menu)
                 .tint(frostOrange)
                 .onChange(of: selectedSeason) { _, _ in selectedEpisode = 1 }
+            }
+            if showSeasonMetadataTools {
+                VStack(alignment: .leading, spacing: 7) {
+                    Button {
+                        Task { await generateSeasonMetadata() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if isGeneratingMetadata {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: "wand.and.stars")
+                            }
+                            Text(isGeneratingMetadata ? "Generating episode metadata…" : "Add Season Metadata")
+                                .font(.caption.weight(.bold))
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity)
+                        .background(frostOrange, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .buttonStyle(FrostPressStyle())
+                    .disabled(isGeneratingMetadata)
+                    if let metadataError {
+                        Text(metadataError).font(.caption2).foregroundStyle(.orange)
+                    } else if let generatedCount {
+                        Text(generatedCount > 0
+                             ? "Filled \(generatedCount) episode\(generatedCount == 1 ? "" : "s") from your model."
+                             : "Your model had nothing new to add for this season.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(store.isAIConfigured
+                             ? "Uses your configured AI model to fill in this season's missing titles, synopses, and artwork. Saved as local edits you can undo any time."
+                             : "Add an AI key in Settings → AI metadata, then tap to fill this season automatically.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             if isLoading && seasons.isEmpty {
                 SkeletonEpisodeRows()
@@ -1874,7 +1971,7 @@ struct EpisodePanel: View {
         .sheet(item: $editingEpisode) { episode in
             EpisodeMetadataEditorView(media: media, season: selectedSeason, episode: episode)
         }
-        .task(id: media.id) {
+        .task(id: catalogReloadKey) {
             streamURLs = [:]
             streamError = nil
             isLoading = true

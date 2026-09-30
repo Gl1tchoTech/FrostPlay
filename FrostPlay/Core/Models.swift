@@ -550,6 +550,45 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Which metadata pipeline resolves one anime title's details and episode rows.
+/// The choice is remembered per title: `.aniList` stays AniList, `.fallback`
+/// keeps using the alternate provider chain, and switching never affects any
+/// other title.
+enum MetadataSourceMode: String, Codable, CaseIterable, Identifiable, Hashable {
+    case aniList
+    case fallback
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .aniList: return "AniList"
+        case .fallback: return "Fallback"
+        }
+    }
+}
+
+/// The prompts the user can edit in Settings. They are sent to whatever
+/// OpenAI-compatible endpoint the user configured, and every `{placeholder}` is
+/// replaced before the request leaves the device.
+enum AIMetadataPrompts {
+    static let system = """
+    You are a meticulous anime and television metadata researcher. You return only valid JSON, you never invent episode numbers, and you leave a field as an empty string when you are unsure.
+    """
+
+    static let episode = """
+    Provide the episode metadata for the series "{title}" ({year}), season {season}. The catalog lists {episode_count} episode(s): {episode_numbers}.
+
+    Return exactly those episodes. Respond with JSON only, in this shape:
+    {
+      "episodes": [
+        { "episode": 1, "title": "Episode title", "synopsis": "One or two sentence synopsis.", "image_url": "https://..." }
+      ]
+    }
+    Use an empty string for any field you do not know, and never change the episode numbers.
+    """
+}
+
 struct FrostPlaySettings: Codable {
     // This default is user-configurable in Settings and is intentionally stored locally.
     // Keep the provided key as the first-run default; users can replace it in Settings.
@@ -626,6 +665,21 @@ struct FrostPlaySettings: Codable {
     /// Stops after the final episode instead of looping back to the first one.
     var stopAfterLastEpisode = true
 
+    // MARK: AI metadata
+
+    /// Lets the configured model fill in missing episode titles, synopses, and artwork.
+    var aiMetadataEnabled = true
+    /// An OpenAI-compatible key, stored locally on this device like the TMDB key.
+    var aiAPIKey = ""
+    /// Base URL of an OpenAI-compatible endpoint (OpenAI, OpenRouter, or a custom host).
+    var aiBaseURL = "https://openrouter.ai/api/v1"
+    /// Model slug sent with every request.
+    var aiModel = "openai/gpt-4o-mini"
+    /// System instruction that shapes the model's response.
+    var aiSystemPrompt = AIMetadataPrompts.system
+    /// The editable user prompt. Its placeholders are documented in Settings → AI metadata.
+    var aiEpisodePrompt = AIMetadataPrompts.episode
+
     enum CodingKeys: String, CodingKey {
         case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, defaultAnimeSource, defaultMovieTVSource, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
         case listCoverStyle, showListCounts, showListAliases, confirmListDeletion
@@ -633,6 +687,7 @@ struct FrostPlaySettings: Codable {
         case rotateHomeCatalog
         case kitsuEpisodeDetails
         case episodeDetailViewEnabled, episodeMetadataEditingEnabled, longPressMarksWatched, autoMarkWatchedOnFinish, watchCompletionThreshold, stopAfterLastEpisode
+        case aiMetadataEnabled, aiAPIKey, aiBaseURL, aiModel, aiSystemPrompt, aiEpisodePrompt
     }
 
     /// The source that should be tried first for a title type, always guaranteed to
@@ -688,6 +743,14 @@ struct FrostPlaySettings: Codable {
         let threshold = try container.decodeIfPresent(Double.self, forKey: .watchCompletionThreshold) ?? defaults.watchCompletionThreshold
         watchCompletionThreshold = min(max(threshold, 0.5), 0.99)
         stopAfterLastEpisode = try container.decodeIfPresent(Bool.self, forKey: .stopAfterLastEpisode) ?? defaults.stopAfterLastEpisode
+        aiMetadataEnabled = try container.decodeIfPresent(Bool.self, forKey: .aiMetadataEnabled) ?? defaults.aiMetadataEnabled
+        aiAPIKey = try container.decodeIfPresent(String.self, forKey: .aiAPIKey) ?? defaults.aiAPIKey
+        aiBaseURL = try container.decodeIfPresent(String.self, forKey: .aiBaseURL) ?? defaults.aiBaseURL
+        aiModel = try container.decodeIfPresent(String.self, forKey: .aiModel) ?? defaults.aiModel
+        let systemPrompt = try container.decodeIfPresent(String.self, forKey: .aiSystemPrompt) ?? defaults.aiSystemPrompt
+        aiSystemPrompt = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaults.aiSystemPrompt : systemPrompt
+        let episodePrompt = try container.decodeIfPresent(String.self, forKey: .aiEpisodePrompt) ?? defaults.aiEpisodePrompt
+        aiEpisodePrompt = episodePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaults.aiEpisodePrompt : episodePrompt
     }
 }
 

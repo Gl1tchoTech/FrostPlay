@@ -27,6 +27,9 @@ final class FrostPlayStore: ObservableObject {
     /// The user's manual corrections to episode titles, synopses, and artwork,
     /// keyed the same way. Applied on top of whatever the providers published.
     @Published private(set) var episodeOverrides: [String: EpisodeMetadataOverride] { didSet { save(episodeOverrides, key: "episodeOverrides") } }
+    /// Which metadata pipeline each anime title uses. Only titles the user has
+    /// switched are stored, so everything else keeps following AniList.
+    @Published private(set) var metadataSources: [String: MetadataSourceMode] { didSet { save(metadataSources, key: "metadataSources") } }
     @Published var searchResults: [MediaItem] = []
     @Published private(set) var animeResults: [MediaItem] = []
     @Published private(set) var animeError: String?
@@ -50,6 +53,8 @@ final class FrostPlayStore: ObservableObject {
 
     private let anilist = AniListService()
     private let kitsu = KitsuService()
+    /// The alternate provider chain (Jikan + AniDB) behind Fallback mode.
+    private let animeFallback = AnimeFallbackService()
     private var searchPage = 1
     private var homePage = 1
     private var providerPage = 1
@@ -105,6 +110,7 @@ final class FrostPlayStore: ObservableObject {
         downloads = Self.load([DownloadEntry].self, key: "downloads") ?? []
         episodeStates = Self.load([String: EpisodeWatchState].self, key: "episodeStates") ?? [:]
         episodeOverrides = Self.load([String: EpisodeMetadataOverride].self, key: "episodeOverrides") ?? [:]
+        metadataSources = Self.load([String: MetadataSourceMode].self, key: "metadataSources") ?? [:]
     }
 
     func loadHome() async {
@@ -207,7 +213,13 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func animeMetadata(for media: MediaItem) async -> MediaMetadata? {
-        guard media.kind == .anime, let aniListID = media.aniListID else { return media.metadata }
+        guard media.kind == .anime else { return media.metadata }
+        // Fallback mode is remembered per title, so this only ever changes the
+        // title the user switched.
+        if metadataSource(for: media) == .fallback {
+            return await animeFallback.metadata(malID: media.malID) ?? media.metadata
+        }
+        guard let aniListID = media.aniListID else { return media.metadata }
         guard let refreshed = try? await anilist.metadata(for: aniListID), refreshed.hasDetails else {
             return media.metadata
         }
@@ -254,15 +266,22 @@ final class FrostPlayStore: ObservableObject {
             }
 
             // AniList owns the numbering, the row order, and the MegaPlay URL.
-            // Kitsu only adds the per-episode titles, synopses, air dates, and
-            // artwork it publishes, and is skipped entirely if it has nothing.
-            if settings.kitsuEpisodeDetails {
-                let details = await kitsu.episodeDetails(aniListID: media.aniListID, malID: media.malID, title: media.title)
+            // The selected provider chain only adds the per-episode titles,
+            // synopses, air dates, and artwork it publishes, and is skipped
+            // entirely if it has nothing.
+            let details: AnimeEpisodeDetails
+            if metadataSource(for: media) == .fallback {
+                details = await animeFallback.episodeDetails(malID: media.malID, title: media.title)
+            } else if settings.kitsuEpisodeDetails {
+                let kitsuDetails = await kitsu.episodeDetails(aniListID: media.aniListID, malID: media.malID, title: media.title)
+                details = AnimeEpisodeDetails(episodes: kitsuDetails.episodes, reportedCount: kitsuDetails.reportedCount)
+            } else {
+                details = AnimeEpisodeDetails(episodes: [], reportedCount: nil)
+            }
+            if !details.episodes.isEmpty || (details.reportedCount ?? 0) > 0 {
                 let expected = max(resolvedCount, max(details.reportedCount ?? 0, details.episodes.count))
-                if !details.episodes.isEmpty || (details.reportedCount ?? 0) > 0 {
-                    episodes = EpisodeDetailsMerger.merge(base: episodes, details: details.episodes, expectedCount: expected)
-                    resolvedCount = max(resolvedCount, episodes.count)
-                }
+                episodes = EpisodeDetailsMerger.merge(base: episodes, details: details.episodes, expectedCount: expected)
+                resolvedCount = max(resolvedCount, episodes.count)
             }
 
             guard resolvedCount > 0 || !episodes.isEmpty else {
@@ -807,6 +826,74 @@ final class FrostPlayStore: ObservableObject {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // MARK: - Per-title metadata source
+
+    func metadataSource(for media: MediaItem) -> MetadataSourceMode {
+        metadataSources[media.id] ?? .aniList
+    }
+
+    /// Switches one title between AniList and the fallback provider chain. The
+    /// choice is remembered for that title only, so the rest of the library is
+    /// untouched, and it is sticky until the user changes it again.
+    @discardableResult
+    func setMetadataSource(_ mode: MetadataSourceMode, for media: MediaItem) -> MetadataSourceMode {
+        if mode == .aniList {
+            metadataSources.removeValue(forKey: media.id)
+        } else {
+            metadataSources[media.id] = mode
+        }
+        return mode
+    }
+
+    @discardableResult
+    func toggleMetadataSource(for media: MediaItem) -> MetadataSourceMode {
+        setMetadataSource(metadataSource(for: media) == .aniList ? .fallback : .aniList, for: media)
+    }
+
+    // MARK: - AI-assisted metadata
+
+    /// True when the user has finished configuring an OpenAI-compatible provider.
+    var isAIConfigured: Bool {
+        settings.aiMetadataEnabled
+            && !settings.aiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !settings.aiModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && AIMetadataService.endpoint(baseURL: settings.aiBaseURL) != nil
+    }
+
+    /// Asks the configured model for a whole season's episode metadata and stores
+    /// it as local overrides — the exact mechanism the manual editor uses, just
+    /// automated. Provider rows keep any field they already published, and an
+    /// episode the user edited by hand is never overwritten.
+    @discardableResult
+    func generateSeasonMetadata(media: MediaItem, season: Int, episodes providerEpisodes: [EpisodeInfo]) async throws -> Int {
+        let numbers = providerEpisodes.map(\.number)
+        guard !numbers.isEmpty else { return 0 }
+        let generated = try await AIMetadataService().episodes(
+            settings: settings,
+            media: media,
+            season: season,
+            episodeNumbers: numbers
+        )
+        let byNumber = Dictionary(generated.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
+        var applied = 0
+        for provider in providerEpisodes {
+            guard let generated = byNumber[provider.number] else { continue }
+            let key = EpisodeWatchState.key(mediaID: media.id, season: season, episode: provider.number)
+            guard episodeOverrides[key] == nil else { continue }
+            let publishedName = provider.hasPublishedName ? provider.name : nil
+            let publishedOverview = Self.trimmedOrNil(provider.overview)
+            let name = Self.trimmedOrNil(generated.name)
+            let overview = Self.trimmedOrNil(generated.overview)
+            let nameValue = name == publishedName ? nil : name
+            let overviewValue = overview == publishedOverview ? nil : overview
+            let imageValue = generated.imageURL == provider.imageURL ? nil : generated.imageURL
+            guard nameValue != nil || overviewValue != nil || imageValue != nil else { continue }
+            setOverride(media: media, season: season, episode: provider.number, name: nameValue, overview: overviewValue, imageURL: imageValue)
+            applied += 1
+        }
+        return applied
     }
 
     /// Removes a title from Continue Watching / watch history only. It stays in My List.

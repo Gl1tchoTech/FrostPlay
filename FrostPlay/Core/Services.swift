@@ -868,6 +868,507 @@ struct AniListService: MetadataService {
     }
 }
 
+// MARK: - Fallback anime metadata (Jikan + AniDB)
+
+/// One provider's answer to "what does this title's episode list look like".
+/// Shared by the fallback chain so it can be merged into AniList's rows exactly
+/// the way Kitsu's details already are.
+struct AnimeEpisodeDetails {
+    let episodes: [EpisodeInfo]
+    /// The provider's own episode total when it publishes one, which fills the
+    /// gap AniList leaves for still-airing and long-running titles.
+    let reportedCount: Int?
+}
+
+/// The alternate provider chain behind a title the user switched to Fallback
+/// mode. Jikan supplies the series details and its episode list; AniDB then
+/// relabels anything Jikan left as a placeholder and adds air dates. AniList
+/// still owns numbering and the MegaPlay playback URL, so this chain only ever
+/// contributes display metadata.
+struct AnimeFallbackService {
+    private let jikan = JikanService()
+    private let anidb = AniDBService()
+
+    func metadata(malID: Int?) async -> MediaMetadata? {
+        guard let malID else { return nil }
+        return await jikan.metadata(malID: malID)
+    }
+
+    func episodeDetails(malID: Int?, title: String?) async -> AnimeEpisodeDetails {
+        let jikanRows: [EpisodeInfo]
+        if let malID {
+            jikanRows = await jikan.episodes(malID: malID)
+        } else {
+            jikanRows = []
+        }
+        let anidbRows = await anidb.episodes(title: title)
+
+        // Jikan is authoritative for the rows it published; AniDB only fills the
+        // gaps and never overwrites a title Jikan already has.
+        var byNumber: [Int: EpisodeInfo] = [:]
+        for row in jikanRows { byNumber[row.number] = row }
+        for row in anidbRows {
+            if let existing = byNumber[row.number] {
+                byNumber[row.number] = existing.merged(with: row)
+            } else {
+                byNumber[row.number] = row
+            }
+        }
+        return AnimeEpisodeDetails(episodes: byNumber.values.sorted { $0.number < $1.number }, reportedCount: nil)
+    }
+}
+
+/// Jikan is a free, keyless mirror of MyAnimeList, and FrostPlay already holds
+/// every anime's MAL ID, so it can be addressed directly. See
+/// https://docs.api.jikan.moe.
+struct JikanService {
+    let session: URLSession = .shared
+
+    private static let base = "https://api.jikan.moe/v4"
+    /// Jikan paginates at 100 rows a page; this bounds a long-running title the
+    /// same way Kitsu enrichment is bounded.
+    private static let maximumEpisodePages = 4
+
+    func metadata(malID: Int) async -> MediaMetadata? {
+        guard let url = URL(string: "\(Self.base)/anime/\(malID)/full") else { return nil }
+        guard let data = try? await fetch(url),
+              let payload = try? JSONDecoder().decode(JikanAnimeResponse.self, from: data),
+              let anime = payload.data else { return nil }
+        return anime.metadata
+    }
+
+    func episodes(malID: Int) async -> [EpisodeInfo] {
+        var rows: [EpisodeInfo] = []
+        for page in 1...Self.maximumEpisodePages {
+            guard let url = URL(string: "\(Self.base)/anime/\(malID)/episodes?page=\(page)"),
+                  let data = try? await fetch(url),
+                  let payload = try? JSONDecoder().decode(JikanEpisodeListResponse.self, from: data) else { break }
+            rows.append(contentsOf: payload.data.compactMap(\.episodeInfo))
+            guard payload.pagination?.hasNextPage == true else { break }
+        }
+        return rows
+    }
+
+    private func fetch(_ url: URL) async throws -> Data {
+        // Jikan allows roughly three requests a second; serializing a page sweep
+        // keeps it inside that budget.
+        await AnimeFallbackThrottle.shared.wait(minimumInterval: 0.4)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        return data
+    }
+}
+
+/// AniDB publishes the deepest per-episode titles and air dates of any anime
+/// database, but it needs a registered client and rate-limits hard, so it is only
+/// consulted for a title the user explicitly switched to Fallback mode.
+///
+/// Note: AniDB's HTTP API is plain HTTP on port 9001, so an app using it needs an
+/// App Transport Security exception for `api.anidb.net`. Without one the request
+/// fails and the chain simply falls through to Jikan.
+struct AniDBService {
+    let session: URLSession = .shared
+
+    private static let base = "http://api.anidb.net:9001/httpapi"
+    /// AniDB asks every app to identify itself; a registered client name/version
+    /// goes here if this default one is ever refused.
+    private static let client = "frostplay"
+    private static let clientVersion = 1
+    /// AniDB bans clients that poll faster than one request every two seconds.
+    private static let minimumInterval: TimeInterval = 2.0
+
+    func episodes(title: String?) async -> [EpisodeInfo] {
+        guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        guard let url = animeURL(title: title), let data = try? await fetch(url) else { return [] }
+        let parser = AniDBAnimeParser()
+        guard parser.parse(data) else { return [] }
+        return parser.episodes.map { row in
+            let name = row.titleEnglish ?? row.titleRomaji ?? ""
+            return EpisodeInfo(
+                number: row.number,
+                name: name.isEmpty ? "Episode \(row.number)" : name,
+                overview: "",
+                airDate: row.airDate,
+                imageURL: nil
+            )
+        }
+    }
+
+    private func animeURL(title: String) -> URL? {
+        var components = URLComponents(string: Self.base)
+        components?.queryItems = [
+            URLQueryItem(name: "request", value: "anime"),
+            URLQueryItem(name: "client", value: Self.client),
+            URLQueryItem(name: "clientver", value: String(Self.clientVersion)),
+            URLQueryItem(name: "protover", value: "1"),
+            URLQueryItem(name: "aname", value: title),
+            URLQueryItem(name: "fuzzy", value: "1")
+        ]
+        return components?.url
+    }
+
+    private func fetch(_ url: URL) async throws -> Data {
+        await AnimeFallbackThrottle.shared.wait(minimumInterval: Self.minimumInterval)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/xml", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw FrostPlayServiceError.invalidResponse
+        }
+        return data
+    }
+}
+
+/// Pulls the episode list out of AniDB's anime XML. Only the first matching
+/// `<anime>` element is read, so a fuzzy title search cannot mix the numbering of
+/// two different series.
+private final class AniDBAnimeParser: NSObject, XMLParserDelegate {
+    struct Row {
+        let number: Int
+        let titleEnglish: String?
+        let titleRomaji: String?
+        let airDate: String?
+    }
+
+    private(set) var episodes: [Row] = []
+    private var animeElementsSeen = 0
+    private var currentNumber: Int?
+    private var currentEnglish: String?
+    private var currentRomaji: String?
+    private var currentAirDate: String?
+    private var currentLanguage = ""
+    private var buffer = ""
+
+    func parse(_ data: Data) -> Bool {
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        parser.shouldProcessNamespaces = false
+        return parser.parse()
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        buffer = ""
+        switch elementName {
+        case "anime":
+            animeElementsSeen += 1
+        case "episode":
+            currentNumber = nil
+            currentEnglish = nil
+            currentRomaji = nil
+            currentAirDate = nil
+        case "title":
+            currentLanguage = attributeDict["xml:lang"] ?? attributeDict["lang"] ?? ""
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        buffer += string
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        let text = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch elementName {
+        case "epno":
+            currentNumber = Int(text)
+        case "title":
+            if currentLanguage == "en" {
+                currentEnglish = text
+            } else if currentLanguage == "x-jat" {
+                currentRomaji = text
+            }
+        case "airdate":
+            currentAirDate = text.isEmpty ? nil : text
+        case "episode":
+            // Only the first fuzzy match is trusted, so numbering stays coherent.
+            if animeElementsSeen == 1, let number = currentNumber, number > 0 {
+                episodes.append(
+                    Row(
+                        number: number,
+                        titleEnglish: currentEnglish.flatMap { $0.isEmpty ? nil : $0 },
+                        titleRomaji: currentRomaji.flatMap { $0.isEmpty ? nil : $0 },
+                        airDate: currentAirDate
+                    )
+                )
+            }
+        default:
+            break
+        }
+        buffer = ""
+    }
+}
+
+/// Serializes fallback-provider requests. Both providers rate-limit aggressively
+/// and will ban a client that bursts, so every request waits its provider's gap.
+private actor AnimeFallbackThrottle {
+    static let shared = AnimeFallbackThrottle()
+    private var lastRequest = Date.distantPast
+
+    func wait(minimumInterval: TimeInterval) async {
+        let elapsed = Date().timeIntervalSince(lastRequest)
+        if elapsed < minimumInterval {
+            try? await Task.sleep(nanoseconds: UInt64((minimumInterval - elapsed) * 1_000_000_000))
+        }
+        lastRequest = Date()
+    }
+}
+
+private struct JikanAnimeResponse: Decodable {
+    let data: JikanAnime?
+}
+
+private struct JikanAnime: Decodable {
+    let score: Double?
+    let status: String?
+    let type: String?
+    let duration: String?
+    let source: String?
+    let genres: [JikanNamed]?
+    let studios: [JikanNamed]?
+
+    struct JikanNamed: Decodable { let name: String }
+
+    var metadata: MediaMetadata {
+        MediaMetadata(
+            genres: (genres ?? []).map(\.name),
+            score: score.map { Int(($0 * 10).rounded()) },
+            status: status,
+            format: type,
+            durationMinutes: Self.minutes(from: duration),
+            source: source?.uppercased(),
+            studios: (studios ?? []).map(\.name)
+        )
+    }
+
+    /// Jikan's `duration` is free text such as "24 min per ep".
+    static func minutes(from duration: String?) -> Int? {
+        guard let duration else { return nil }
+        let digits = duration.prefix { $0.isNumber }
+        return digits.isEmpty ? nil : Int(digits)
+    }
+}
+
+private struct JikanEpisodeListResponse: Decodable {
+    let data: [JikanEpisode]
+    let pagination: Pagination?
+
+    struct Pagination: Decodable {
+        let hasNextPage: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case hasNextPage = "has_next_page"
+        }
+    }
+}
+
+private struct JikanEpisode: Decodable {
+    let malID: Int?
+    let title: String?
+    let aired: String?
+
+    enum CodingKeys: String, CodingKey {
+        case malID = "mal_id"
+        case title, aired
+    }
+
+    var episodeInfo: EpisodeInfo? {
+        guard let malID, malID > 0 else { return nil }
+        let trimmed = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return EpisodeInfo(
+            number: malID,
+            name: trimmed.isEmpty ? "Episode \(malID)" : trimmed,
+            overview: "",
+            airDate: aired.map { String($0.prefix(10)) },
+            imageURL: nil
+        )
+    }
+}
+
+// MARK: - AI metadata
+
+enum AIMetadataError: LocalizedError {
+    case notConfigured
+    case invalidConfiguration
+    case requestFailed(String)
+    case emptyResponse
+    case noEpisodesFound
+
+    var errorDescription: String? {
+        switch self {
+        case .notConfigured:
+            return "Add an API key in Settings → AI metadata first."
+        case .invalidConfiguration:
+            return "The AI base URL or model is not valid. Check Settings → AI metadata."
+        case .requestFailed(let message):
+            return "The AI provider rejected the request: \(message)"
+        case .emptyResponse:
+            return "The AI model returned an empty response."
+        case .noEpisodesFound:
+            return "The AI model returned no usable episode data."
+        }
+    }
+}
+
+/// Calls an OpenAI-compatible chat-completions endpoint with the key the user
+/// stored locally. The same request shape works for OpenAI, OpenRouter, and any
+/// custom host, so only the base URL and model slug change.
+struct AIMetadataService {
+    struct GeneratedEpisode {
+        let number: Int
+        let name: String?
+        let overview: String?
+        let imageURL: URL?
+    }
+
+    let session: URLSession = .shared
+
+    func episodes(
+        settings: FrostPlaySettings,
+        media: MediaItem,
+        season: Int,
+        episodeNumbers: [Int]
+    ) async throws -> [GeneratedEpisode] {
+        let key = settings.aiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard settings.aiMetadataEnabled, !key.isEmpty else { throw AIMetadataError.notConfigured }
+        let model = settings.aiModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty, let url = Self.endpoint(baseURL: settings.aiBaseURL) else {
+            throw AIMetadataError.invalidConfiguration
+        }
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": Self.render(settings.aiSystemPrompt, media: media, season: season, episodeNumbers: episodeNumbers)],
+                ["role": "user", "content": Self.render(settings.aiEpisodePrompt, media: media, season: season, episodeNumbers: episodeNumbers)]
+            ],
+            "response_format": ["type": "json_object"],
+            "temperature": 0.2
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300 ~= http.statusCode) {
+            throw AIMetadataError.requestFailed(Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)")
+        }
+        guard let payload = try? JSONDecoder().decode(AIChatResponse.self, from: data),
+              let content = payload.choices.first?.message.content,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIMetadataError.emptyResponse
+        }
+        let episodes = Self.decodeEpisodes(from: content)
+        guard !episodes.isEmpty else { throw AIMetadataError.noEpisodesFound }
+        return episodes
+    }
+
+    /// Accepts either the API root ("https://api.openai.com/v1") or a full
+    /// completions path, so a custom host can paste whichever it documents.
+    static func endpoint(baseURL: String) -> URL? {
+        var trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        guard let url = URL(string: trimmed), url.scheme != nil, url.host != nil else { return nil }
+        if url.path.lowercased().hasSuffix("/chat/completions") { return url }
+        return url.appendingPathComponent("chat/completions")
+    }
+
+    /// Replaces every documented `{placeholder}` the prompt carries.
+    static func render(_ template: String, media: MediaItem, season: Int, episodeNumbers: [Int]) -> String {
+        let replacements: [String: String] = [
+            "{title}": media.title,
+            "{year}": media.year ?? "unknown year",
+            "{format}": media.metadata?.format ?? media.kind.title,
+            "{season}": String(season),
+            "{episode_count}": String(episodeNumbers.count),
+            "{episode_numbers}": episodeNumbers.isEmpty ? "unknown" : episodeNumbers.map(String.init).joined(separator: ", "),
+            "{genres}": media.metadata?.genres.joined(separator: ", ") ?? "",
+            "{overview}": media.overview
+        ]
+        var output = template
+        for (token, value) in replacements {
+            output = output.replacingOccurrences(of: token, with: value)
+        }
+        return output
+    }
+
+    /// Providers wrap JSON in prose or code fences often enough that parsing
+    /// tolerates both: skip to the first `{` or `[` and read from there.
+    static func decodeEpisodes(from content: String) -> [GeneratedEpisode] {
+        var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let fence = text.range(of: "```") {
+            text = String(text[fence.upperBound...])
+            if let end = text.range(of: "```") { text = String(text[..<end.lowerBound]) }
+            if let newline = text.firstIndex(of: "\n") { text = String(text[text.index(after: newline)...]) }
+        }
+        guard let start = text.firstIndex(where: { $0 == "{" || $0 == "[" }),
+              let data = String(text[start...]).data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        if let array = object as? [[String: Any]] { return array.compactMap(episode(from:)) }
+        if let dictionary = object as? [String: Any] {
+            for key in ["episodes", "episode_metadata", "data", "items", "results"] {
+                if let array = dictionary[key] as? [[String: Any]] { return array.compactMap(episode(from:)) }
+            }
+        }
+        return []
+    }
+
+    private static func episode(from object: [String: Any]) -> GeneratedEpisode? {
+        let number = (object["episode"] as? Int)
+            ?? (object["episode"] as? String).flatMap { Int($0) }
+            ?? (object["number"] as? Int)
+            ?? (object["number"] as? String).flatMap { Int($0) }
+        guard let number, number > 0 else { return nil }
+        let name = string(object["title"]) ?? string(object["name"])
+        let overview = string(object["synopsis"]) ?? string(object["overview"]) ?? string(object["description"])
+        let imageURL = (string(object["image_url"]) ?? string(object["image"]) ?? string(object["thumbnail"]))
+            .flatMap { URL(string: $0) }
+        return GeneratedEpisode(number: number, name: name, overview: overview, imageURL: imageURL)
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func errorMessage(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let error = object["error"] as? [String: Any], let message = error["message"] as? String { return message }
+        return object["message"] as? String
+    }
+}
+
+private struct AIChatResponse: Decodable {
+    let choices: [Choice]
+
+    struct Choice: Decodable { let message: Message }
+    struct Message: Decodable { let content: String? }
+}
+
 // MARK: - Kitsu
 
 private struct KitsuAnime: Hashable {

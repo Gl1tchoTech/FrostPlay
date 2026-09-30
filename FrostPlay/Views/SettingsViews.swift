@@ -156,6 +156,116 @@ struct PlaybackSettingsView: View {
     }
 }
 
+/// The presets the AI connection starts from. OpenRouter and OpenAI speak the
+/// same OpenAI-compatible request shape, so only the base URL and model change.
+private enum AIMetadataPreset: String, CaseIterable, Identifiable {
+    case openRouter = "OpenRouter"
+    case openAI = "OpenAI"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+
+    var baseURL: String {
+        switch self {
+        case .openRouter: return "https://openrouter.ai/api/v1"
+        case .openAI: return "https://api.openai.com/v1"
+        case .custom: return ""
+        }
+    }
+
+    var defaultModel: String {
+        switch self {
+        case .openRouter: return "openai/gpt-4o-mini"
+        case .openAI: return "gpt-4o-mini"
+        case .custom: return ""
+        }
+    }
+
+    static func matching(_ baseURL: String) -> AIMetadataPreset {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed == Self.openRouter.baseURL.lowercased() { return .openRouter }
+        if trimmed == Self.openAI.baseURL.lowercased() { return .openAI }
+        return .custom
+    }
+}
+
+/// Links an OpenAI-compatible key (OpenAI, OpenRouter, or a custom host) and
+/// edits the prompt the model receives when the user taps "Add Season Metadata".
+struct AIMetadataSettingsView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+
+    var body: some View {
+        Form {
+            Section("Provider") {
+                Picker("Preset", selection: presetSelection) {
+                    ForEach(AIMetadataPreset.allCases) { preset in Text(preset.rawValue).tag(preset) }
+                }
+                Toggle("Enable AI metadata", isOn: $store.settings.aiMetadataEnabled)
+                Text("FrostPlay calls the endpoint you configure directly from this device. The key is stored locally in settings, exactly like your TMDB key.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .listRowBackground(frostPanel)
+            Section("Connection") {
+                SecureField("API key", text: $store.settings.aiAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.password)
+                TextField("Base URL", text: $store.settings.aiBaseURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                TextField("Model", text: $store.settings.aiModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Label(
+                    store.isAIConfigured ? "Ready" : "Add a key and model to enable AI metadata",
+                    systemImage: store.isAIConfigured ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(store.isAIConfigured ? .green : .orange)
+                Text("Any host that speaks the OpenAI chat-completions API works. FrostPlay appends `/chat/completions` to the base URL unless it is already there.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .listRowBackground(frostPanel)
+            Section("Prompt") {
+                Text("Placeholders: {title} {year} {format} {season} {episode_count} {episode_numbers} {genres} {overview}")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("System").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                TextEditor(text: $store.settings.aiSystemPrompt)
+                    .frame(minHeight: 80)
+                    .font(.footnote.monospaced())
+                Text("User").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                TextEditor(text: $store.settings.aiEpisodePrompt)
+                    .frame(minHeight: 190)
+                    .font(.footnote.monospaced())
+                Button("Reset prompts") {
+                    store.settings.aiSystemPrompt = AIMetadataPrompts.system
+                    store.settings.aiEpisodePrompt = AIMetadataPrompts.episode
+                }
+            }
+            .listRowBackground(frostPanel)
+        }
+        .navigationTitle("AI metadata")
+        .scrollContentBackground(.hidden)
+        .background(frostBackground)
+    }
+
+    /// Picking a preset fills in the base URL and model; Custom leaves whatever
+    /// the user already typed so they can point at their own host.
+    private var presetSelection: Binding<AIMetadataPreset> {
+        Binding(
+            get: { AIMetadataPreset.matching(store.settings.aiBaseURL) },
+            set: { preset in
+                guard preset != .custom else { return }
+                store.settings.aiBaseURL = preset.baseURL
+                store.settings.aiModel = preset.defaultModel
+            }
+        )
+    }
+}
+
 struct SubtitleSettingsView: View {
     @EnvironmentObject private var store: FrostPlayStore
     var body: some View {
