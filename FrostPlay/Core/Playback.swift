@@ -106,47 +106,124 @@ struct PlaybackResolver {
     }
 }
 
+/// What an embedded third-party player reported. An embed's video lives in a
+/// cross-origin iframe, so the sources that publish progress events are listened
+/// to through the message bridge and everything else falls back to the player's
+/// own close-time estimate.
+enum EmbedPlaybackEvent {
+    case finished
+    case progress(seconds: Double, duration: Double)
+}
+
 struct HybridPlayer: View {
     let format: PlaybackFormat
     var source: PlaybackSource? = nil
+    /// Seconds to resume from, for direct files only (an embed owns its own seek).
+    var resumeSeconds: Double = 0
+    var onFinished: (() -> Void)? = nil
+    var onProgress: ((Double, Double) -> Void)? = nil
+
     var body: some View {
         switch format {
-        case .embed(let url): EmbedPlayer(url: url, source: source ?? EmbedURL.source(hosting: url))
-        case .hls(let url), .mp4(let url): DirectVideoPlayer(url: url)
+        case .embed(let url):
+            EmbedPlayer(
+                url: url,
+                source: source ?? EmbedURL.source(hosting: url),
+                onEvent: { event in
+                    switch event {
+                    case .finished: onFinished?()
+                    case .progress(let seconds, let duration): onProgress?(seconds, duration)
+                    }
+                }
+            )
+        case .hls(let url), .mp4(let url):
+            DirectVideoPlayer(url: url, resumeSeconds: resumeSeconds, onFinished: onFinished, onProgress: onProgress)
         }
     }
 }
 
 final class PlayerController: ObservableObject {
     let player: AVPlayer
+    /// Fired when a direct file reaches its end, which is what lets the player
+    /// offer the next episode without the user touching anything.
+    var onFinished: (() -> Void)?
+    /// Fired every few seconds with (position, duration), both in seconds.
+    var onProgress: ((Double, Double) -> Void)?
 
-    init(url: URL) {
+    private let resumeSeconds: Double
+    private var endObserver: NSObjectProtocol?
+    private var timeObserver: Any?
+
+    init(url: URL, resumeSeconds: Double = 0) {
         let item = AVPlayerItem(url: url)
         item.preferredForwardBufferDuration = 12
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
         player.allowsExternalPlayback = false
+        self.resumeSeconds = max(resumeSeconds, 0)
     }
 
     func prepare() {
+        installObservers()
+        // Ignore a resume point that is only a few seconds in; restarting is
+        // better than landing on the opening seconds twice.
+        if resumeSeconds > 5 {
+            player.seek(to: CMTime(seconds: resumeSeconds, preferredTimescale: 600))
+        }
         player.play()
+    }
+
+    private func installObservers() {
+        guard endObserver == nil else { return }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            self?.onFinished?()
+        }
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 5, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            guard let self,
+                  let duration = self.player.currentItem?.duration.seconds,
+                  duration.isFinite, duration > 0,
+                  time.seconds.isFinite else { return }
+            self.onProgress?(time.seconds, duration)
+        }
+    }
+
+    deinit {
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
     }
 }
 
 struct DirectVideoPlayer: View {
     let url: URL
+    var resumeSeconds: Double = 0
+    var onFinished: (() -> Void)? = nil
+    var onProgress: ((Double, Double) -> Void)? = nil
     @StateObject private var controller: PlayerController
 
-    init(url: URL) {
+    init(url: URL, resumeSeconds: Double = 0, onFinished: (() -> Void)? = nil, onProgress: ((Double, Double) -> Void)? = nil) {
         self.url = url
-        _controller = StateObject(wrappedValue: PlayerController(url: url))
+        self.resumeSeconds = resumeSeconds
+        self.onFinished = onFinished
+        self.onProgress = onProgress
+        _controller = StateObject(wrappedValue: PlayerController(url: url, resumeSeconds: resumeSeconds))
     }
 
     var body: some View {
         VideoPlayer(player: controller.player)
             .background(Color.black)
-            .onAppear { controller.prepare() }
+            .onAppear {
+                controller.onFinished = onFinished
+                controller.onProgress = onProgress
+                controller.prepare()
+            }
             .onDisappear { controller.player.pause() }
             .ignoresSafeArea()
     }
@@ -155,10 +232,39 @@ struct DirectVideoPlayer: View {
 struct EmbedPlayer: UIViewRepresentable {
     let url: URL
     var source: PlaybackSource? = nil
+    /// Receives the progress and completion events an embed publishes.
+    var onEvent: ((EmbedPlaybackEvent) -> Void)? = nil
 
-    /// Remembers which embed is mounted so a different source reloads the player.
+    /// Remembers which embed is mounted so a different source reloads the player,
+    /// and owns the script bridge that turns embed events into Swift callbacks.
     final class Coordinator {
         var loadedURL: URL?
+        let bridge = MessageBridge()
+    }
+
+    /// The wrapper page is loaded with the embed's own origin as its base URL, so
+    /// `postMessage` from the embed's iframe lands here. Every message is
+    /// whitelisted back to the trusted source hosts before it is believed.
+    final class MessageBridge: NSObject, WKScriptMessageHandler {
+        static let handlerName = "frostplayPlayback"
+        var onEvent: ((EmbedPlaybackEvent) -> Void)?
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any],
+                  let event = body["event"] as? String else { return }
+            switch event {
+            case "complete":
+                onEvent?(.finished)
+            case "progress":
+                let seconds = (body["currentTime"] as? NSNumber)?.doubleValue ?? 0
+                let duration = (body["duration"] as? NSNumber)?.doubleValue ?? 0
+                if seconds.isFinite, duration.isFinite, duration > 0 {
+                    onEvent?(.progress(seconds: seconds, duration: duration))
+                }
+            default:
+                break
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -167,6 +273,11 @@ struct EmbedPlayer: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.userContentController.add(context.coordinator.bridge, name: MessageBridge.handlerName)
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.bridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+        context.coordinator.bridge.onEvent = onEvent
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.scrollView.isScrollEnabled = false
         webView.isOpaque = false
@@ -177,10 +288,17 @@ struct EmbedPlayer: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.bridge.onEvent = onEvent
         // Reload when the resolved source changes (the in-player source picker)
         // instead of keeping whatever embed was mounted first.
         guard context.coordinator.loadedURL != url else { return }
         loadEmbed(in: webView, coordinator: context.coordinator)
+    }
+
+    /// Removes the message handler so a torn-down player does not keep the bridge
+    /// (and the closures it holds) alive.
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: MessageBridge.handlerName)
     }
 
     private func loadEmbed(in webView: WKWebView, coordinator: Coordinator) {
@@ -201,6 +319,65 @@ struct EmbedPlayer: UIViewRepresentable {
         // The embed's own origin, so each source keeps its referrer rules.
         webView.loadHTMLString(html, baseURL: trustedURL)
     }
+
+    /// Forwarded from the embed to FrostPlay. Embeds cannot be observed directly,
+    /// so this listens for the playback events the sources publish and reports only
+    /// messages that came from a trusted host.
+    private static let bridgeScript: String = {
+        let hosts = EmbedURL.trustedHosts.map { "\"\($0)\"" }.joined(separator: ", ")
+        return scriptTemplate
+            .replacingOccurrences(of: "__HANDLER__", with: MessageBridge.handlerName)
+            .replacingOccurrences(of: "__TRUSTED_HOSTS__", with: "[\(hosts)]")
+    }()
+
+    private static let scriptTemplate = """
+    (function () {
+      var TRUSTED = __TRUSTED_HOSTS__;
+      function trusted(origin) {
+        try {
+          var host = new URL(origin).hostname.toLowerCase();
+          for (var i = 0; i < TRUSTED.length; i++) {
+            var allowed = TRUSTED[i];
+            if (host === allowed || host.slice(-(allowed.length + 1)) === '.' + allowed) return true;
+          }
+        } catch (error) {}
+        return false;
+      }
+      function send(payload) {
+        try { window.webkit.messageHandlers.__HANDLER__.postMessage(payload); } catch (error) {}
+      }
+      function interpret(data) {
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch (error) { return; }
+        }
+        if (!data || typeof data !== 'object') return;
+        var name = String(data.event || data.type || data.name || '').toLowerCase();
+        var inner = (data.data && typeof data.data === 'object') ? data.data : {};
+        if (name === 'complete' || name === 'ended' || name === 'finished' || name === 'video-ended') {
+          send({ event: 'complete' });
+          return;
+        }
+        var current = Number(data.currentTime || data.time || inner.currentTime || inner.time || 0);
+        var total = Number(data.duration || inner.duration || 0);
+        if (isFinite(current) && current >= 0) {
+          send({ event: 'progress', currentTime: current, duration: isFinite(total) ? total : 0 });
+        }
+      }
+      window.addEventListener('message', function (event) {
+        if (!trusted(event.origin)) return;
+        interpret(event.data);
+      });
+      function attach() {
+        var video = document.querySelector('video');
+        if (!video) { setTimeout(attach, 1500); return; }
+        video.addEventListener('ended', function () { send({ event: 'complete' }); });
+        video.addEventListener('timeupdate', function () {
+          send({ event: 'progress', currentTime: video.currentTime, duration: video.duration || 0 });
+        });
+      }
+      attach();
+    })();
+    """
 }
 
 struct AuthorizedDownloadManager {

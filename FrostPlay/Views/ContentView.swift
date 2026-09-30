@@ -17,6 +17,22 @@ private func displaySynopsis(_ synopsis: String, maxCharacters: Int = 96) -> Str
     return String(synopsis.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
 }
 
+/// Trims a text field down to something storable: whitespace-only becomes nil, so
+/// an empty field means "keep what the provider published".
+private func cleanedText(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+/// "12:34" for a resume point, so the player can name where it will pick up.
+private func timecodeLabel(_ seconds: Double) -> String {
+    guard seconds.isFinite, seconds > 0 else { return "0:00" }
+    let total = Int(seconds.rounded())
+    let minutes = total / 60
+    let remainder = total % 60
+    return String(format: "%d:%02d", minutes, remainder)
+}
+
 struct StreamingProvider: Identifiable {
     let id: String
     let name: String
@@ -1345,6 +1361,7 @@ struct SettingsView: View {
             List {
                 NavigationLink { AppearanceSettingsView() } label: { SettingsRow(icon: "paintpalette", title: "Appearance", subtitle: "Artwork, blur, text, and motion") }
                 NavigationLink { PlaybackSettingsView() } label: { SettingsRow(icon: "play.rectangle", title: "Playback", subtitle: "Quality, autoplay, subtitles, and sources") }
+                NavigationLink { EpisodeMetadataSettingsView() } label: { SettingsRow(icon: "list.bullet.rectangle", title: "Episodes", subtitle: "Autoplay, watched state, and episode edits") }
                 NavigationLink { SubtitleSettingsView() } label: { SettingsRow(icon: "captions.bubble", title: "Subtitles", subtitle: "Native player, color, and sizing") }
                 NavigationLink { CatalogSettingsView() } label: { SettingsRow(icon: "key", title: "Catalog & API", subtitle: store.isTMDBConfigured ? "TMDB connected" : "TMDB key required") }
                 NavigationLink { SourceSettingsView() } label: { SettingsRow(icon: "arrow.triangle.2.circlepath", title: "Sources", subtitle: "Priority and availability") }
@@ -1405,6 +1422,7 @@ struct NoticeCard: View {
 }
 
 struct ContentRail: View {
+    @EnvironmentObject private var store: FrostPlayStore
     let title: String
     let items: [MediaItem]
     /// When set, the rail heading carries the service's real logo and name, so a
@@ -1436,12 +1454,27 @@ struct ContentRail: View {
                                         .frame(width: 106, height: 32, alignment: .leading)
                                         .foregroundStyle(.white)
                                         .clipped()
-                                    if progress { ProgressView(value: 0.35).tint(frostOrange).frame(width: 106) }
+                                    if progress {
+                                        // Continue Watching shows the real per-episode
+                                        // progress of each title, plus the episode it
+                                        // would resume.
+                                        ProgressView(value: min(max(store.resumeProgress(for: media), 0.02), 1))
+                                            .tint(frostOrange)
+                                            .frame(width: 106)
+                                        if let resume = store.resumeLabel(for: media) {
+                                            Text(resume)
+                                                .font(.caption2)
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
+                                                .frame(width: 106, alignment: .leading)
+                                                .foregroundStyle(.white.opacity(0.5))
+                                        }
+                                    }
                                 }
                                 .frame(width: 106, alignment: .leading)
                                 .clipped()
                             }
-                            .frame(width: 106, height: progress ? 192 : 182, alignment: .topLeading)
+                            .frame(width: 106, height: progress ? 214 : 182, alignment: .topLeading)
                             .buttonStyle(.plain)
                             .onAppear { if media.id == items.last?.id { onReachedEnd?() } }
                         }
@@ -1484,6 +1517,23 @@ struct DetailView: View {
         media.kind == .movie || (media.kind == .anime && (refreshedAnimeMetadata ?? media.metadata)?.format?.uppercased() == "MOVIE")
     }
     private var currentSource: PlaybackSource { store.settings.defaultSource(for: media.kind) }
+
+    /// Where "Play" resumes: the episode the title was last on, or episode one.
+    private var startPosition: EpisodeSequencer.Position {
+        guard let state = store.latestEpisodeState(for: media.id) else {
+            return EpisodeSequencer.Position(season: 1, episode: 1)
+        }
+        return EpisodeSequencer.Position(season: state.season, episode: state.episode)
+    }
+
+    private var playTitle: String {
+        media.isEpisodic && store.hasResumePosition(for: media) ? "Resume" : "Play"
+    }
+
+    private var playSubtitle: String {
+        guard media.isEpisodic, let state = store.latestEpisodeState(for: media.id) else { return "Start streaming" }
+        return "From S\(state.season) · Episode \(state.episode)"
+    }
 
     var body: some View {
         ScrollView {
@@ -1552,9 +1602,9 @@ struct DetailView: View {
                     HStack(spacing: 10) {
                         if isPlayable {
                             NavigationLink {
-                                PlayerView(media: media)
+                                PlayerView(media: media, season: startPosition.season, episode: startPosition.episode, seasons: seasons)
                             } label: {
-                                FrostActionLabel(title: "Play", systemImage: "play.fill", subtitle: "Start streaming", prominent: true)
+                                FrostActionLabel(title: playTitle, systemImage: "play.fill", subtitle: playSubtitle, prominent: true)
                             }
                             .buttonStyle(FrostPressStyle())
                         }
@@ -1640,18 +1690,45 @@ struct EpisodePanel: View {
     @State private var streamURLs: [Int: URL] = [:]
     @State private var isLoadingStreams = false
     @State private var streamError: String?
+    @State private var playingEpisode: EpisodeInfo?
+    @State private var editingEpisode: EpisodeInfo?
 
     private var currentSeason: SeasonEpisodeInfo? { seasons.first(where: { $0.season == selectedSeason }) }
-    private var episodes: [EpisodeInfo] {
+
+    /// The rows the providers produced, one per episode the season actually has,
+    /// with the resolved MegaPlay URL folded in but the user's own edits not yet
+    /// applied. Kept separate from `episodes` because the metadata editor must
+    /// treat these as the published baseline.
+    private var providerEpisodes: [EpisodeInfo] {
         guard let currentSeason else { return [] }
-        let catalogEpisodes = currentSeason.episodes.isEmpty
-            ? (1...max(currentSeason.episodeCount, 1)).map { EpisodeInfo(number: $0, name: "Episode \($0)", overview: "", airDate: nil, imageURL: nil) }
-            : currentSeason.episodes
-        return catalogEpisodes.map { episode in
-            var updated = episode
-            updated.playbackURL = streamURLs[episode.number] ?? episode.playbackURL
-            return updated
+        return EpisodeSequencer.episodeNumbers(of: currentSeason).map { number in
+            var row = currentSeason.episodes.first(where: { $0.number == number })
+                ?? EpisodeInfo(number: number, name: "Episode \(number)", overview: "", airDate: nil, imageURL: nil)
+            row.playbackURL = streamURLs[number] ?? row.playbackURL
+            return row
         }
+    }
+
+    /// What the list shows: the provider rows with the user's own edits applied.
+    private var episodes: [EpisodeInfo] {
+        providerEpisodes.map { store.applyOverride(to: $0, media: media, season: selectedSeason) }
+    }
+
+    private var watchedCount: Int { store.watchedCount(media: media, season: selectedSeason, episodes: episodes) }
+
+    private var episodeCountSummary: String {
+        let base = "S\(selectedSeason) · \(episodes.count) episode\(episodes.count == 1 ? "" : "s")"
+        return watchedCount > 0 ? "\(base) · \(watchedCount) watched" : base
+    }
+
+    /// The catalog a pushed player should page through, with the resolved stream
+    /// URLs already folded in. The player resolves its own metadata needs and
+    /// page through this, so the user's edits are deliberately not baked in.
+    private var resolvedSeasons: [SeasonEpisodeInfo] {
+        guard let currentSeason else { return seasons }
+        var updated = currentSeason
+        updated.episodes = providerEpisodes
+        return seasons.map { $0.season == selectedSeason ? updated : $0 }
     }
 
     private func loadAnimeStreams() async { // resolves MegaPlay URLs for anime episodes
@@ -1682,7 +1759,7 @@ struct EpisodePanel: View {
                 Text("Episodes").font(.headline).foregroundStyle(.white)
                 Spacer()
                 if isLoading || isLoadingStreams { ProgressView().tint(frostOrange) }
-                else { Text("S\(selectedSeason) · \(episodes.count) episodes").font(.caption).foregroundStyle(.secondary) }
+                else { Text(episodeCountSummary).font(.caption).foregroundStyle(.secondary) }
             }
             if media.kind == .anime && isLoadingStreams {
                 Text("Finding MegaPlay streams…").font(.caption).foregroundStyle(.secondary)
@@ -1725,8 +1802,20 @@ struct EpisodePanel: View {
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
-                    Text("Episode \(selected.number) · \(selected.name)").font(.subheadline.bold()).foregroundStyle(.white)
-                    Text(selected.overview.isEmpty ? "No episode-specific details are published by AniList for this title." : selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    Text("Episode \(selected.number)\(selected.hasPublishedName ? " · \(selected.name)" : "")").font(.subheadline.bold()).foregroundStyle(.white)
+                    if selected.overview.isEmpty {
+                        Text(selected.hasNoDetails ? "No provider published a title, synopsis, or artwork for this episode. Open it to add your own." : "No synopsis was published for this episode.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.62))
+                            .lineLimit(3)
+                    } else {
+                        Text(selected.overview).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(3)
+                    }
+                    if store.isWatched(media: media, season: selectedSeason, episode: selected.number) {
+                        Label("Watched", systemImage: "checkmark.circle.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(frostOrange)
+                    }
                     if media.kind == .anime && selected.playbackURL == nil && !isLoadingStreams {
                         Label("MegaPlay stream unavailable", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2.weight(.medium))
@@ -1741,51 +1830,50 @@ struct EpisodePanel: View {
             }
             LazyVStack(spacing: 9) {
                 ForEach(episodes) { episode in
-                    NavigationLink(destination: PlayerView(media: media, season: selectedSeason, episode: episode.number, preferredPlaybackURL: episode.playbackURL)) {
-                        HStack(alignment: .top, spacing: 11) {
-                            if let imageURL = episode.imageURL {
-                                Poster(url: imageURL, width: 92, height: 58)
-                            } else {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(episode.number == selectedEpisode ? frostOrange : Color.white.opacity(0.09))
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-                                    Text("E\(episode.number)").font(.subheadline.bold()).foregroundStyle(episode.number == selectedEpisode ? Color.black : Color.white)
-                                }
-                                .frame(width: 48, height: 40)
+                    Group {
+                        if store.settings.episodeDetailViewEnabled {
+                            NavigationLink {
+                                EpisodeDetailView(media: media, seasons: resolvedSeasons, startSeason: selectedSeason, startAt: episode.number)
+                            } label: {
+                                EpisodeRow(
+                                    episode: episode,
+                                    isSelected: episode.number == selectedEpisode,
+                                    isWatched: store.isWatched(media: media, season: selectedSeason, episode: episode.number),
+                                    progress: store.episodeProgress(media: media, season: selectedSeason, episode: episode.number),
+                                    streamUnavailable: media.kind == .anime && episode.playbackURL == nil,
+                                    hasOverride: store.hasOverride(media: media, season: selectedSeason, episode: episode.number)
+                                )
                             }
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(episode.name)
-                                    .font(.subheadline.weight(.semibold))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .foregroundStyle(.white)
-                                if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
-                                Text(episode.overview.isEmpty ? (media.kind == .anime ? "No episode-specific details on AniList." : "No description available.") : episode.overview).font(.caption).foregroundStyle(.white.opacity(0.58)).lineLimit(2)
+                            .buttonStyle(.plain)
+                        } else {
+                            NavigationLink {
+                                PlayerView(media: media, season: selectedSeason, episode: episode.number, preferredPlaybackURL: episode.playbackURL, seasons: resolvedSeasons)
+                            } label: {
+                                EpisodeRow(
+                                    episode: episode,
+                                    isSelected: episode.number == selectedEpisode,
+                                    isWatched: store.isWatched(media: media, season: selectedSeason, episode: episode.number),
+                                    progress: store.episodeProgress(media: media, season: selectedSeason, episode: episode.number),
+                                    streamUnavailable: media.kind == .anime && episode.playbackURL == nil,
+                                    hasOverride: store.hasOverride(media: media, season: selectedSeason, episode: episode.number)
+                                )
                             }
-                            Spacer()
-                            Image(systemName: media.kind == .anime && episode.playbackURL == nil ? "exclamationmark.circle" : "play.fill")
-                                .font(.caption)
-                                .foregroundStyle(media.kind == .anime && episode.playbackURL == nil ? .orange : frostOrange)
+                            .buttonStyle(.plain)
                         }
-                        .padding(11)
-                        .background(
-                            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                .fill(episode.number == selectedEpisode ? frostOrange.opacity(0.12) : Color.white.opacity(0.04))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                .strokeBorder(episode.number == selectedEpisode ? frostOrange.opacity(0.45) : Color.white.opacity(0.07), lineWidth: 1)
-                        )
                     }
-                    .buttonStyle(.plain)
                     .simultaneousGesture(TapGesture().onEnded { selectedEpisode = episode.number })
+                    .contextMenu { episodeActions(for: episode) }
                 }
             }
         }
         .padding(14)
         .frostGlass(cornerRadius: 20, opacity: 0.9)
+        .navigationDestination(item: $playingEpisode) { episode in
+            PlayerView(media: media, season: selectedSeason, episode: episode.number, preferredPlaybackURL: episode.playbackURL, seasons: resolvedSeasons)
+        }
+        .sheet(item: $editingEpisode) { episode in
+            EpisodeMetadataEditorView(media: media, season: selectedSeason, episode: episode)
+        }
         .task(id: media.id) {
             streamURLs = [:]
             streamError = nil
@@ -1801,6 +1889,482 @@ struct EpisodePanel: View {
             guard media.kind == .anime else { return }
             Task { await loadAnimeStreams() }
         }
+    }
+
+    /// The long-press menu on an episode row: watching, catching up, and correcting
+    /// whatever the providers published or omitted.
+    @ViewBuilder
+    private func episodeActions(for episode: EpisodeInfo) -> some View {
+        Button {
+            playingEpisode = episode
+        } label: {
+            Label("Play episode", systemImage: "play.fill")
+        }
+        if store.settings.longPressMarksWatched {
+            let watched = store.isWatched(media: media, season: selectedSeason, episode: episode.number)
+            Button {
+                store.toggleWatched(media: media, season: selectedSeason, episode: episode.number)
+            } label: {
+                Label(watched ? "Mark unwatched" : "Mark watched", systemImage: watched ? "circle" : "checkmark.circle")
+            }
+            Button {
+                store.markPreviousWatched(media: media, season: selectedSeason, episode: episode.number, in: episodes)
+            } label: {
+                Label("Mark previous watched", systemImage: "arrow.up.to.line")
+            }
+        }
+        if store.settings.episodeMetadataEditingEnabled {
+            Button {
+                // The editor's baseline is the provider's own row, never a copy of
+                // an edit the user already saved.
+                editingEpisode = providerEpisodes.first { $0.number == episode.number } ?? episode
+            } label: {
+                Label("Edit details", systemImage: "pencil")
+            }
+            if store.hasOverride(media: media, season: selectedSeason, episode: episode.number) {
+                Button(role: .destructive) {
+                    store.clearOverride(media: media, season: selectedSeason, episode: episode.number)
+                } label: {
+                    Label("Reset details", systemImage: "arrow.counterclockwise")
+                }
+            }
+        }
+    }
+}
+
+/// One row of the episode list. Its own view so the tap target, the watched mark,
+/// and the resume progress stay readable next to the row's metadata.
+struct EpisodeRow: View {
+    let episode: EpisodeInfo
+    let isSelected: Bool
+    let isWatched: Bool
+    let progress: Double
+    let streamUnavailable: Bool
+    let hasOverride: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            artwork
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if isWatched {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(frostOrange)
+                    }
+                    Text(episode.hasPublishedName ? episode.name : "Episode \(episode.number)")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(isWatched ? Color.white.opacity(0.6) : Color.white)
+                    if hasOverride {
+                        Image(systemName: "pencil")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
+                }
+                if let airDate = episode.airDate, !airDate.isEmpty { Text(airDate).font(.caption2).foregroundStyle(.secondary) }
+                // A row the providers left blank says so, instead of restating
+                // "Episode N" as if it were a title.
+                Text(episode.overview.isEmpty ? (episode.hasNoDetails ? "No published details for this episode." : "No synopsis published for this episode.") : episode.overview)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(2)
+                if progress > 0.01 && !isWatched {
+                    ProgressView(value: min(progress, 1))
+                        .tint(frostOrange)
+                }
+            }
+            Spacer()
+            Image(systemName: streamUnavailable ? "exclamationmark.circle" : "play.fill")
+                .font(.caption)
+                .foregroundStyle(streamUnavailable ? Color.orange : frostOrange)
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(isSelected ? frostOrange.opacity(0.12) : Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .strokeBorder(isSelected ? frostOrange.opacity(0.45) : Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        if let imageURL = episode.imageURL {
+            Poster(url: imageURL, width: 92, height: 58)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? frostOrange : Color.white.opacity(0.09))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                Text("E\(episode.number)")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(isSelected ? Color.black : Color.white)
+            }
+            .frame(width: 48, height: 40)
+        }
+    }
+}
+
+/// The screen an episode row opens. It shows the episode's own metadata without
+/// truncating it, offers the actions that used to be buried in long-press menus,
+/// and steps through the season in place so the navigation stack never grows.
+struct EpisodeDetailView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    let media: MediaItem
+    /// The whole catalog, so "Next" at the end of a season continues into the next
+    /// one and the player can autoplay across the boundary.
+    let seasons: [SeasonEpisodeInfo]
+    @State private var season: Int
+    @State private var selectedNumber: Int
+    @State private var editingEpisode: EpisodeInfo?
+    @State private var showingSourcePicker = false
+
+    init(media: MediaItem, seasons: [SeasonEpisodeInfo], startSeason: Int, startAt: Int) {
+        self.media = media
+        self.seasons = seasons
+        _season = State(initialValue: startSeason)
+        _selectedNumber = State(initialValue: startAt)
+    }
+
+    /// This season's provider rows, which is what the screen steps through.
+    private var episodes: [EpisodeInfo] {
+        seasons.first { $0.season == season }?.episodes ?? []
+    }
+
+    /// The provider's own row for this episode: the baseline the editor compares
+    /// against, so "unchanged" really means unchanged.
+    private var published: EpisodeInfo? { episodes.first { $0.number == selectedNumber } }
+    /// What is on screen: the published row with the user's edits applied, so an
+    /// edit shows up immediately instead of waiting for the list to reload.
+    private var episode: EpisodeInfo? {
+        guard let published else { return nil }
+        return store.applyOverride(to: published, media: media, season: season)
+    }
+    private var isWatched: Bool { store.isWatched(media: media, season: season, episode: selectedNumber) }
+    private var progress: Double { store.episodeProgress(media: media, season: season, episode: selectedNumber) }
+    private var resumeSeconds: Double { store.resumeSeconds(for: media, season: season, episode: selectedNumber) }
+    private var currentSource: PlaybackSource { store.settings.defaultSource(for: media.kind) }
+    private var streamUnavailable: Bool { media.kind == .anime && episode?.playbackURL == nil }
+    private var hasOverride: Bool { store.hasOverride(media: media, season: season, episode: selectedNumber) }
+
+    private var headline: String {
+        guard let episode, episode.hasPublishedName else { return "Episode \(selectedNumber)" }
+        return episode.name
+    }
+
+    private var overviewText: String {
+        guard let episode else { return "This episode is no longer part of the loaded season." }
+        if !episode.overview.isEmpty { return episode.overview }
+        return "No synopsis was published for this episode."
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 17) {
+                Poster(url: episode?.imageURL ?? media.backdropURL ?? media.posterURL, width: nil, height: 220)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                Text(headline)
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+                    .minimumScaleFactor(0.72)
+                    .foregroundStyle(.white)
+                Text("S\(season) · Episode \(selectedNumber)" + (media.year.map { " · \($0)" } ?? ""))
+                    .foregroundStyle(.secondary)
+                badges
+                actions
+                if let episode, episode.hasNoDetails {
+                    NoticeCard(
+                        title: "No published details",
+                        message: "AniList and Kitsu published no title, synopsis, or artwork for this episode. Add your own and they stay on this device.",
+                        systemImage: "questionmark.circle"
+                    )
+                }
+                Text(overviewText)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+                if episodes.count > 1 { stepControls }
+            }
+            .frame(width: UIScreen.main.bounds.width, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 160)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(frostBackground.ignoresSafeArea())
+        .navigationTitle(media.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .preferredColorScheme(.dark)
+        .sheet(item: $editingEpisode) { row in
+            EpisodeMetadataEditorView(media: media, season: season, episode: row)
+        }
+        .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
+    }
+
+    private var badges: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                DetailBadge(
+                    label: isWatched ? "Watched" : (progress > 0.01 ? "In progress" : "Not watched"),
+                    icon: isWatched ? "checkmark.circle.fill" : "circle"
+                )
+                if let airDate = episode?.airDate, !airDate.isEmpty { DetailBadge(label: airDate, icon: "calendar") }
+            }
+            HStack(spacing: 8) {
+                DetailBadge(label: currentSource.rawValue, icon: "play.circle.fill")
+                if hasOverride { DetailBadge(label: "Edited", icon: "pencil") }
+                if resumeSeconds > 5 { DetailBadge(label: "Resume \(timecodeLabel(resumeSeconds))", icon: "clock.arrow.circlepath") }
+            }
+        }
+    }
+
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                NavigationLink {
+                    PlayerView(media: media, season: season, episode: selectedNumber, preferredPlaybackURL: episode?.playbackURL, seasons: seasons)
+                } label: {
+                    FrostActionLabel(
+                        title: resumeSeconds > 5 ? "Resume" : "Play",
+                        systemImage: "play.fill",
+                        subtitle: resumeSeconds > 5 ? "From \(timecodeLabel(resumeSeconds))" : "Start this episode",
+                        prominent: true
+                    )
+                }
+                .buttonStyle(FrostPressStyle())
+                .disabled(streamUnavailable)
+                Button {
+                    store.setWatched(!isWatched, media: media, season: season, episode: selectedNumber)
+                } label: {
+                    FrostActionLabel(
+                        title: isWatched ? "Watched" : "Mark watched",
+                        systemImage: isWatched ? "checkmark.circle.fill" : "checkmark.circle",
+                        subtitle: isWatched ? "Tap to unwatch" : "Track this episode"
+                    )
+                }
+                .buttonStyle(FrostPressStyle())
+            }
+            if store.settings.episodeMetadataEditingEnabled {
+                Button {
+                    editingEpisode = published
+                } label: {
+                    FrostActionLabel(
+                        title: "Edit details",
+                        systemImage: "pencil",
+                        subtitle: hasOverride ? "You replaced this episode's details" : "Fix a missing title, synopsis, or artwork"
+                    )
+                }
+                .buttonStyle(FrostPressStyle())
+                .disabled(published == nil)
+            }
+            Button {
+                showingSourcePicker = true
+            } label: {
+                FrostActionLabel(
+                    title: currentSource.rawValue,
+                    systemImage: "rectangle.2.swap",
+                    subtitle: "Playback source · tap to change",
+                    trailingChevron: true
+                )
+            }
+            .buttonStyle(FrostPressStyle())
+            if hasOverride {
+                Button(role: .destructive) {
+                    store.clearOverride(media: media, season: season, episode: selectedNumber)
+                } label: {
+                    FrostActionLabel(
+                        title: "Reset this episode",
+                        systemImage: "arrow.counterclockwise",
+                        subtitle: "Back to the published metadata"
+                    )
+                }
+                .buttonStyle(FrostPressStyle())
+            }
+            if store.episodeOverrideCount(for: media) > 0 {
+                Button(role: .destructive) {
+                    store.clearOverrides(for: media)
+                } label: {
+                    FrostActionLabel(
+                        title: "Reset all edits for this title",
+                        systemImage: "trash",
+                        subtitle: "\(store.episodeOverrideCount(for: media)) episode\(store.episodeOverrideCount(for: media) == 1 ? "" : "s") edited"
+                    )
+                }
+                .buttonStyle(FrostPressStyle())
+            }
+        }
+    }
+
+    private var stepControls: some View {
+        HStack(spacing: 10) {
+            Button { step(-1) } label: {
+                Label("Previous", systemImage: "chevron.left")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .frostGlass(cornerRadius: 12, opacity: 0.85)
+            }
+            .buttonStyle(FrostPressStyle())
+            .disabled(!hasPrevious)
+            Button { step(1) } label: {
+                Label("Next episode", systemImage: "chevron.right")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .frostGlass(cornerRadius: 12, opacity: 0.85)
+            }
+            .buttonStyle(FrostPressStyle())
+            .disabled(!hasNext)
+        }
+    }
+
+    private var currentPosition: EpisodeSequencer.Position {
+        EpisodeSequencer.Position(season: season, episode: selectedNumber)
+    }
+
+    private var hasPrevious: Bool { EpisodeSequencer.previous(in: seasons, before: currentPosition) != nil }
+    private var hasNext: Bool { EpisodeSequencer.next(in: seasons, after: currentPosition) != nil }
+
+    /// Moves one episode in either direction, crossing into the next season when a
+    /// season runs out instead of stopping at the boundary.
+    private func step(_ offset: Int) {
+        let target = offset > 0
+            ? EpisodeSequencer.next(in: seasons, after: currentPosition)
+            : EpisodeSequencer.previous(in: seasons, before: currentPosition)
+        guard let target else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            season = target.season
+            selectedNumber = target.episode
+        }
+    }
+}
+
+/// The editor for one episode's title, synopsis, and artwork. The episode number
+/// is the key playback, progress, and autoplay are built on, so it is shown but
+/// never editable.
+struct EpisodeMetadataEditorView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    @Environment(\.dismiss) private var dismiss
+    let media: MediaItem
+    let season: Int
+    let episode: EpisodeInfo
+
+    @State private var name = ""
+    @State private var overview = ""
+    @State private var imageURLText = ""
+    @State private var imageURLError: String?
+
+    private var existing: EpisodeMetadataOverride? {
+        store.episodeOverrides[EpisodeWatchState.key(mediaID: media.id, season: season, episode: episode.number)]
+    }
+
+    /// Only a real http(s) image URL is accepted; anything else keeps the field
+    /// from saving instead of silently producing a broken poster.
+    private var parsedImageURL: URL? {
+        guard let trimmed = cleanedText(imageURLText), let url = URL(string: trimmed) else { return nil }
+        let scheme = url.scheme?.lowercased()
+        return (scheme == "http" || scheme == "https") ? url : nil
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Episode") {
+                    LabeledContent("Number", value: "Episode \(episode.number)")
+                    Text("The episode number and its stream are fixed: the providers, your progress, and autoplay are all keyed to them.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Section("Title") {
+                    TextField("Episode title", text: $name)
+                    if episode.hasPublishedName {
+                        Button("Use published title") { name = episode.name }
+                            .font(.footnote)
+                    }
+                }
+                Section("Synopsis") {
+                    TextField("What happens in this episode", text: $overview, axis: .vertical)
+                        .lineLimit(3...8)
+                    if !episode.overview.isEmpty {
+                        Button("Use published synopsis") { overview = episode.overview }
+                            .font(.footnote)
+                    }
+                }
+                Section("Artwork") {
+                    TextField("Image URL", text: $imageURLText)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    if let imageURLError {
+                        Text(imageURLError).font(.footnote).foregroundStyle(.orange)
+                    }
+                    if let preview = parsedImageURL {
+                        Poster(url: preview, width: nil, height: 150)
+                    }
+                }
+                Section {
+                    Button(role: .destructive) {
+                        store.clearOverride(media: media, season: season, episode: episode.number)
+                        dismiss()
+                    } label: {
+                        Label("Reset to published details", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(existing == nil)
+                } footer: {
+                    Text("Changes are stored on this device only, and never change which episode plays.")
+                }
+            }
+            .navigationTitle("Episode \(episode.number)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save() }.disabled(imageURLError != nil)
+                }
+            }
+            .onAppear(perform: load)
+            .onChange(of: imageURLText) { _, _ in validateImageURL() }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func load() {
+        name = existing?.name ?? (episode.hasPublishedName ? episode.name : "")
+        overview = existing?.overview ?? episode.overview
+        imageURLText = (existing?.imageURL ?? episode.imageURL)?.absoluteString ?? ""
+        validateImageURL()
+    }
+
+    private func validateImageURL() {
+        imageURLError = (cleanedText(imageURLText) != nil && parsedImageURL == nil)
+            ? "Enter a full http or https image address."
+            : nil
+    }
+
+    /// Only the fields the user actually changed are stored, so untouched metadata
+    /// keeps following the provider instead of freezing a copy.
+    private func save() {
+        let publishedName = episode.hasPublishedName ? episode.name : nil
+        let nameValue = cleanedText(name)
+        let overviewValue = cleanedText(overview)
+        store.setOverride(
+            media: media,
+            season: season,
+            episode: episode.number,
+            name: nameValue == publishedName ? nil : nameValue,
+            overview: overviewValue == cleanedText(episode.overview) ? nil : overviewValue,
+            imageURL: parsedImageURL == episode.imageURL ? nil : parsedImageURL
+        )
+        dismiss()
     }
 }
 
@@ -1871,40 +2435,117 @@ struct PlayerView: View {
     @EnvironmentObject private var store: FrostPlayStore
     @Environment(\.dismiss) private var dismiss
     let media: MediaItem
-    let season: Int
-    let episode: Int
-    let preferredPlaybackURL: URL?
+    @State private var season: Int
+    @State private var episode: Int
+    @State private var preferredURL: URL?
+    @State private var catalog: [SeasonEpisodeInfo]
     @State private var showingSourcePicker = false
+    /// The episode the countdown is about to play, if any.
+    @State private var pendingNext: EpisodeSequencer.Position?
+    @State private var countdownRemaining = 0
+    /// The show is over: the last episode finished and autoplay stops here.
+    @State private var isFinished = false
+    @State private var didFinishCurrentEpisode = false
+    @State private var lastSeconds: Double = 0
+    @State private var lastDuration: Double = 0
+    @State private var lastRecordedSeconds: Double = 0
+    @State private var lastRecordedAt: Date = .distantPast
+    /// Manual replays rebuild the player without changing the episode.
+    @State private var playerToken = UUID()
     private let resolver = PlaybackResolver()
-    private var resolvedPlayback: ResolvedPlayback? {
-        resolver.resolveSource(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredPlaybackURL)
-    }
-    init(media: MediaItem, season: Int = 1, episode: Int = 1, preferredPlaybackURL: URL? = nil) {
+    /// How long the "up next" bar waits before switching episodes.
+    private let advanceCountdownSeconds = 10
+
+    /// `seasons` is the catalog the episode list already holds, so autoplay does
+    /// not refetch it. Players opened without one load their own.
+    init(media: MediaItem, season: Int = 1, episode: Int = 1, preferredPlaybackURL: URL? = nil, seasons: [SeasonEpisodeInfo] = []) {
         self.media = media
-        self.season = season
-        self.episode = episode
-        self.preferredPlaybackURL = preferredPlaybackURL
+        _season = State(initialValue: season)
+        _episode = State(initialValue: episode)
+        _preferredURL = State(initialValue: preferredPlaybackURL)
+        _catalog = State(initialValue: seasons)
     }
+
+    private var resolvedPlayback: ResolvedPlayback? {
+        resolver.resolveSource(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredURL)
+    }
+
+    /// Identity for the player subtree: a new episode, a new source, or a replay
+    /// rebuilds the player. The resume point is deliberately NOT part of it, or a
+    /// progress update would tear the player down mid-episode.
+    private var playerIdentity: String {
+        let stream = resolvedPlayback?.format.streamURL.absoluteString ?? "none"
+        return "\(season)-\(episode)-\(stream)-\(playerToken.uuidString)"
+    }
+
+    /// The next episode in order, crossing into the next season when one ends.
+    private var nextPosition: EpisodeSequencer.Position? {
+        guard media.isEpisodic, !catalog.isEmpty else { return nil }
+        return EpisodeSequencer.next(in: catalog, after: EpisodeSequencer.Position(season: season, episode: episode))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.bold())
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .frostGlass(cornerRadius: 12, opacity: 0.9)
+            header
+            if let format = resolvedPlayback?.format {
+                HybridPlayer(
+                    format: format,
+                    source: resolvedPlayback?.source,
+                    resumeSeconds: store.resumeSeconds(for: media, season: season, episode: episode),
+                    onFinished: { handleFinished() },
+                    onProgress: { seconds, duration in handleProgress(seconds: seconds, duration: duration) }
+                )
+                .id(playerIdentity)
+                .frame(maxHeight: .infinity)
+                if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
+                    Button { Task { try? await store.download(media: media, format: format, episode: media.isEpisodic ? episode : nil) } } label: {
+                        FrostActionLabel(title: "Download MP4", systemImage: "arrow.down.circle.fill", subtitle: "Save this file for offline playback", prominent: true)
+                    }
+                    .buttonStyle(FrostPressStyle())
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
-                .buttonStyle(FrostPressStyle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(media.kind == .movie ? media.title : "S\(season) · Episode \(episode)").font(.headline).lineLimit(1)
-                    Text(resolvedPlayback?.source.rawValue.uppercased() ?? "FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
-                }
-                Spacer()
-                Button { showingSourcePicker = true } label: {
+            } else {
+                ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Pick a different source for this title type."))
+            }
+        }
+        .background(Color.black)
+        .ignoresSafeArea()
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .overlay(alignment: .bottom) { advanceOverlay }
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: pendingNext)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: isFinished)
+        .onAppear { store.recordWatch(media, season: season, episode: episode) }
+        .onDisappear(perform: recordCompletionIfNeeded)
+        .task(id: media.id) { await loadCatalogIfNeeded() }
+        .task(id: pendingNext) { await runAdvanceCountdown() }
+        .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .frostGlass(cornerRadius: 12, opacity: 0.9)
+            }
+            .buttonStyle(FrostPressStyle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text(media.isEpisodic ? "S\(season) · Episode \(episode)" : media.title).font(.headline).lineLimit(1)
+                Text(resolvedPlayback?.source.rawValue.uppercased() ?? "FROSTPLAY PLAYER").font(.caption2.bold()).tracking(1.5).foregroundStyle(frostOrange)
+            }
+            Spacer()
+            if let next = nextPosition {
+                Button { play(next) } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "rectangle.2.swap").font(.caption2.bold())
-                        Text("Source").font(.caption.bold())
+                        Image(systemName: "forward.end.fill").font(.caption2.bold())
+                        Text("Next").font(.caption.bold())
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
@@ -1912,30 +2553,234 @@ struct PlayerView: View {
                     .frostGlass(cornerRadius: 12, opacity: 0.9)
                 }
                 .buttonStyle(FrostPressStyle())
-                .accessibilityLabel("Change playback source")
+                .accessibilityLabel("Play the next episode")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            if let format = resolver.resolve(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredPlaybackURL) {
-                HybridPlayer(format: format, source: resolvedPlayback?.source).frame(maxHeight: .infinity)
-                if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
-                    Button { Task { try? await store.download(media: media, format: format, episode: media.kind == .movie ? nil : episode) } } label: {
-                        FrostActionLabel(title: "Download MP4", systemImage: "arrow.down.circle.fill", subtitle: "Save this file for offline playback", prominent: true)
-                    }
-                    .buttonStyle(FrostPressStyle())
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+            Button { showingSourcePicker = true } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.2.swap").font(.caption2.bold())
+                    Text("Source").font(.caption.bold())
                 }
-            } else { ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Pick a different source for this title type.")) }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frostGlass(cornerRadius: 12, opacity: 0.9)
+            }
+            .buttonStyle(FrostPressStyle())
+            .accessibilityLabel("Change playback source")
         }
-        .background(Color.black)
-        .ignoresSafeArea()
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
-        .onAppear { store.recordWatch(media) }
-        .sheet(isPresented: $showingSourcePicker) { SourcePickerView(media: media) }
-        .toolbar(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
-        .navigationBarBackButtonHidden(true)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var advanceOverlay: some View {
+        if let next = pendingNext {
+            upNextBar(next)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        } else if isFinished {
+            finishedBar
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    /// The countdown bar: the next episode is offered, and the user can take it
+    /// right away or cancel before it starts.
+    private func upNextBar(_ next: EpisodeSequencer.Position) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "forward.end.fill").foregroundStyle(frostOrange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("UP NEXT").font(.caption2.bold()).tracking(1.4).foregroundStyle(frostOrange)
+                    Text(next.label).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                }
+                Spacer()
+                Text("\(max(countdownRemaining, 0))s").font(.subheadline.bold()).monospacedDigit().foregroundStyle(.white)
+            }
+            ProgressView(
+                value: Double(max(advanceCountdownSeconds - countdownRemaining, 0)),
+                total: Double(advanceCountdownSeconds)
+            )
+            .tint(frostOrange)
+            HStack(spacing: 10) {
+                Button { play(next) } label: {
+                    Label("Play now", systemImage: "play.fill")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(frostOrange, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(FrostPressStyle())
+                Button { cancelAdvance() } label: {
+                    Label("Cancel", systemImage: "xmark")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .frostGlass(cornerRadius: 12, opacity: 0.9)
+                }
+                .buttonStyle(FrostPressStyle())
+            }
+        }
+        .padding(14)
+        .frostGlass(cornerRadius: 18, highlighted: true, opacity: 0.95)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 18)
+    }
+
+    /// Shown once the last episode of the last season ends, instead of looping.
+    private var finishedBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("You finished the last episode", systemImage: "checkmark.seal.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("Autoplay stops here instead of looping back to the first episode.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.65))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button { replay() } label: {
+                    Label("Replay", systemImage: "arrow.counterclockwise")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(frostOrange, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(FrostPressStyle())
+                Button { dismiss() } label: {
+                    Label("Close", systemImage: "xmark")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .frostGlass(cornerRadius: 12, opacity: 0.9)
+                }
+                .buttonStyle(FrostPressStyle())
+            }
+        }
+        .padding(14)
+        .frostGlass(cornerRadius: 18, opacity: 0.95)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 18)
+    }
+
+    // MARK: - Episode switching
+
+    private func play(_ position: EpisodeSequencer.Position) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            applyPosition(position)
+        }
+    }
+
+    private func applyPosition(_ position: EpisodeSequencer.Position) {
+        pendingNext = nil
+        countdownRemaining = 0
+        isFinished = false
+        didFinishCurrentEpisode = false
+        lastSeconds = 0
+        lastDuration = 0
+        lastRecordedSeconds = 0
+        lastRecordedAt = .distantPast
+        season = position.season
+        episode = position.episode
+        preferredURL = catalogPlaybackURL(for: position)
+        playerToken = UUID()
+        store.recordWatch(media, season: position.season, episode: position.episode)
+    }
+
+    private func cancelAdvance() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            pendingNext = nil
+            countdownRemaining = 0
+        }
+    }
+
+    private func replay() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            isFinished = false
+            didFinishCurrentEpisode = false
+            lastSeconds = 0
+            lastDuration = 0
+            lastRecordedSeconds = 0
+            lastRecordedAt = .distantPast
+            playerToken = UUID()
+        }
+    }
+
+    private func catalogPlaybackURL(for position: EpisodeSequencer.Position) -> URL? {
+        catalog.first { $0.season == position.season }?
+            .episodes.first { $0.number == position.episode }?
+            .playbackURL
+    }
+
+    private func loadCatalogIfNeeded() async {
+        guard media.isEpisodic, catalog.isEmpty else { return }
+        catalog = await store.episodeCatalog(for: media)
+    }
+
+    /// Runs the "up next" countdown. Changing `pendingNext` cancels this task and
+    /// starts a fresh one, so Play now and Cancel both settle immediately.
+    private func runAdvanceCountdown() async {
+        guard pendingNext != nil else { return }
+        if countdownRemaining <= 0 { countdownRemaining = advanceCountdownSeconds }
+        while countdownRemaining > 0 {
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+            if Task.isCancelled { return }
+            countdownRemaining -= 1
+        }
+        guard let next = pendingNext else { return }
+        play(next)
+    }
+
+    // MARK: - Playback events
+
+    /// Called when the current episode ends. Records what was watched, then offers
+    /// the next episode, walking into the next season when this one runs out.
+    private func handleFinished() {
+        guard media.isEpisodic, !didFinishCurrentEpisode else { return }
+        didFinishCurrentEpisode = true
+        store.markEpisodeFinished(media: media, season: season, episode: episode)
+        if store.settings.autoplayNextEpisode, let next = nextPosition {
+            countdownRemaining = advanceCountdownSeconds
+            pendingNext = next
+        } else if !catalog.isEmpty, nextPosition == nil, store.settings.stopAfterLastEpisode {
+            isFinished = true
+        }
+    }
+
+    private func handleProgress(seconds: Double, duration: Double) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        // Some embeds report a position with no length. The resume point is still
+        // worth keeping; only a real duration can say an episode is finished.
+        let total = (duration.isFinite && duration > 0) ? duration : 0
+        lastSeconds = seconds
+        lastDuration = total
+        // Embeds report their position several times a second; persisting every one
+        // of those would write to storage continuously. Ten seconds, or a large
+        // jump, keeps the resume point accurate without hammering it.
+        let now = Date()
+        if now.timeIntervalSince(lastRecordedAt) >= 10 || abs(seconds - lastRecordedSeconds) >= 30 {
+            lastRecordedAt = now
+            lastRecordedSeconds = seconds
+            store.recordEpisodeProgress(seconds: seconds, duration: total, media: media, season: season, episode: episode)
+        }
+        // Not every embed announces completion, so a finished-looking position
+        // counts as the end of the episode too.
+        if total > 0, seconds / total >= store.settings.watchCompletionThreshold {
+            handleFinished()
+        }
+    }
+
+    /// Belt and braces for an embed that stops reporting near the end: leaving the
+    /// player at the finish line still counts as finishing the episode.
+    private func recordCompletionIfNeeded() {
+        guard !didFinishCurrentEpisode, lastDuration > 0 else { return }
+        guard lastSeconds / lastDuration >= store.settings.watchCompletionThreshold else { return }
+        store.markEpisodeFinished(media: media, season: season, episode: episode)
     }
 }

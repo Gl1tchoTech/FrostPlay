@@ -117,10 +117,20 @@ struct PlaybackSettingsView: View {
         Form {
             Section("Playback") {
                 Picker("Preferred quality", selection: $store.settings.preferredQuality) { Text("Auto").tag("Auto"); Text("1080p").tag("1080p"); Text("720p").tag("720p") }
-                Toggle("Autoplay next episode", isOn: $store.settings.autoplayNextEpisode)
                 Toggle("Auto skip intro", isOn: $store.settings.autoSkipIntro)
                 Toggle("Auto subtitles", isOn: $store.settings.autoSubtitles)
                 Toggle("Allow direct-file downloads", isOn: $store.settings.downloadsEnabled)
+            }
+            Section("Episodes") {
+                Toggle("Autoplay next episode", isOn: $store.settings.autoplayNextEpisode)
+                Toggle("Mark watched when finished", isOn: $store.settings.autoMarkWatchedOnFinish)
+                Toggle("Long-press marks watched", isOn: $store.settings.longPressMarksWatched)
+                NavigationLink { EpisodeMetadataSettingsView() } label: {
+                    Label("Episode metadata", systemImage: "list.bullet.rectangle")
+                }
+                Text("Autoplay offers the next episode with a countdown you can accept or cancel, continues into the next season, and stops after the final episode. Your position inside every episode is remembered separately.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section("Anime") {
                 Picker("Preferred language", selection: $store.settings.preferredAnimeLanguage) { Text("Sub").tag("sub"); Text("Dub").tag("dub") }
@@ -195,6 +205,67 @@ struct CatalogSettingsView: View {
         .navigationTitle("Catalog & API")
         .scrollContentBackground(.hidden)
         .background(frostBackground)
+    }
+}
+
+/// The per-episode experience: how episode rows behave, how watched state is
+/// tracked, and one place to undo every manual episode edit.
+struct EpisodeMetadataSettingsView: View {
+    @EnvironmentObject private var store: FrostPlayStore
+    @State private var showingResetConfirmation = false
+
+    var body: some View {
+        Form {
+            Section("Episode screen") {
+                Toggle("Open episode details first", isOn: $store.settings.episodeDetailViewEnabled)
+                Toggle("Allow editing episode details", isOn: $store.settings.episodeMetadataEditingEnabled)
+                Text("Tapping an episode opens its own screen with the full synopsis and its watched state. Long-pressing a row still offers Play, watched, and edit actions.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Watched state") {
+                Toggle("Long-press marks watched", isOn: $store.settings.longPressMarksWatched)
+                Toggle("Mark watched when finished", isOn: $store.settings.autoMarkWatchedOnFinish)
+                SliderRow(
+                    title: "Finished at",
+                    value: $store.settings.watchCompletionThreshold,
+                    range: 0.5...0.99,
+                    suffix: "\(Int(store.settings.watchCompletionThreshold * 100))%"
+                )
+                .disabled(!store.settings.autoMarkWatchedOnFinish)
+                Text("An episode counts as finished once playback passes this point. Resume positions are kept per episode whether or not you mark them watched.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Autoplay") {
+                Toggle("Autoplay next episode", isOn: $store.settings.autoplayNextEpisode)
+                Toggle("Stop after the last episode", isOn: $store.settings.stopAfterLastEpisode)
+                Text("The next episode is offered with a countdown bar. Ending a season continues with the next season's first episode.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                LabeledContent("Episodes with your edits", value: "\(store.episodeOverrideCount)")
+                Button(role: .destructive) {
+                    showingResetConfirmation = true
+                } label: {
+                    Label("Reset all episode edits", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(store.episodeOverrideCount == 0)
+            } footer: {
+                Text("Titles, synopses, and artwork you replaced go back to what the providers published. Watched state and resume positions are kept.\n\nWhen a provider publishes no title, synopsis, or artwork for an episode, FrostPlay says so on the row instead of repeating \"Episode N\".")
+            }
+        }
+        .listRowBackground(frostPanel)
+        .navigationTitle("Episode metadata")
+        .scrollContentBackground(.hidden)
+        .background(frostBackground)
+        .confirmationDialog("Reset every episode edit?", isPresented: $showingResetConfirmation, titleVisibility: .visible) {
+            Button("Reset edits", role: .destructive) { store.clearAllEpisodeOverrides() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Episode titles, synopses, and artwork you replaced return to the provider's own data.")
+        }
     }
 }
 

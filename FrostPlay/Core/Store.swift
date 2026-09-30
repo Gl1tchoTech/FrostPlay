@@ -20,6 +20,13 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var collections: [MediaCollection] { didSet { save(collections, key: "collections") } }
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published private(set) var downloads: [DownloadEntry] { didSet { save(downloads, key: "downloads") } }
+    /// Per-episode watch state, keyed by "mediaID|season|episode". Titles store
+    /// their own coarse history; this remembers each episode's watched flag, its
+    /// progress, and where to resume.
+    @Published private(set) var episodeStates: [String: EpisodeWatchState] { didSet { save(episodeStates, key: "episodeStates") } }
+    /// The user's manual corrections to episode titles, synopses, and artwork,
+    /// keyed the same way. Applied on top of whatever the providers published.
+    @Published private(set) var episodeOverrides: [String: EpisodeMetadataOverride] { didSet { save(episodeOverrides, key: "episodeOverrides") } }
     @Published var searchResults: [MediaItem] = []
     @Published private(set) var animeResults: [MediaItem] = []
     @Published private(set) var animeError: String?
@@ -96,6 +103,8 @@ final class FrostPlayStore: ObservableObject {
         collections = Self.restoredCollections()
         history = Self.load([WatchEntry].self, key: "history") ?? []
         downloads = Self.load([DownloadEntry].self, key: "downloads") ?? []
+        episodeStates = Self.load([String: EpisodeWatchState].self, key: "episodeStates") ?? [:]
+        episodeOverrides = Self.load([String: EpisodeMetadataOverride].self, key: "episodeOverrides") ?? [:]
     }
 
     func loadHome() async {
@@ -585,8 +594,219 @@ final class FrostPlayStore: ObservableObject {
         history.insert(entry, at: 0)
     }
 
+    /// Records a title in Continue Watching and remembers which episode is being
+    /// watched, so Continue Watching can name it and offer the right resume point.
+    func recordWatch(_ media: MediaItem, season: Int, episode: Int) {
+        // A film has no episodes, so it only gets the title-level entry; otherwise
+        // Continue Watching would label it "S1 · Episode 1".
+        guard media.isEpisodic else {
+            recordWatch(media)
+            return
+        }
+        // Touch the episode first: it becomes the title's latest, so the title-level
+        // progress recorded below describes the episode that is actually playing.
+        updateEpisodeState(mediaID: media.id, season: season, episode: episode)
+        recordWatch(media, progress: resumeProgress(for: media))
+    }
+
     func isInHistory(_ media: MediaItem) -> Bool {
         history.contains { $0.id == media.id }
+    }
+
+    // MARK: - Episode watch state
+
+    func episodeState(mediaID: String, season: Int, episode: Int) -> EpisodeWatchState? {
+        episodeStates[EpisodeWatchState.key(mediaID: mediaID, season: season, episode: episode)]
+    }
+
+    func episodeState(media: MediaItem, season: Int, episode: Int) -> EpisodeWatchState? {
+        episodeState(mediaID: media.id, season: season, episode: episode)
+    }
+
+    func isWatched(_ media: MediaItem, season: Int, episode: Int) -> Bool {
+        episodeState(media: media, season: season, episode: episode)?.watched ?? false
+    }
+
+    /// 0...1 progress of one episode, used by its row and its detail screen.
+    func episodeProgress(_ media: MediaItem, season: Int, episode: Int) -> Double {
+        episodeState(media: media, season: season, episode: episode)?.progress ?? 0
+    }
+
+    /// The seconds the player should resume from, or 0 when the episode is fresh
+    /// or was already finished.
+    func resumeSeconds(for media: MediaItem, season: Int, episode: Int) -> Double {
+        guard let state = episodeState(media: media, season: season, episode: episode), state.isResumable else { return 0 }
+        return state.resumeSeconds
+    }
+
+    func setWatched(_ watched: Bool, media: MediaItem, season: Int, episode: Int) {
+        updateEpisodeState(
+            mediaID: media.id,
+            season: season,
+            episode: episode,
+            watched: watched,
+            progress: watched ? 1 : 0,
+            resumeSeconds: 0
+        )
+    }
+
+    func toggleWatched(media: MediaItem, season: Int, episode: Int) {
+        setWatched(!isWatched(media, season: season, episode: episode), media: media, season: season, episode: episode)
+    }
+
+    /// Marks this episode and every earlier one in the season watched, so catching
+    /// up on a long-running show is one long-press instead of a hundred taps.
+    func markPreviousWatched(media: MediaItem, season: Int, episode: Int, in episodes: [EpisodeInfo]) {
+        for row in episodes where row.number <= episode {
+            updateEpisodeState(mediaID: media.id, season: season, episode: row.number, watched: true, progress: 1, resumeSeconds: 0)
+        }
+    }
+
+    func watchedCount(media: MediaItem, season: Int, episodes: [EpisodeInfo]) -> Int {
+        episodes.reduce(0) { $0 + (isWatched(media, season: season, episode: $1.number) ? 1 : 0) }
+    }
+
+    /// Stores where playback is, both as a fraction (for the UI) and in seconds
+    /// (so the player can resume mid-episode instead of restarting it). A duration
+    /// of 0 means the embed reported a position but no length, which is still
+    /// enough to resume from.
+    func recordEpisodeProgress(seconds: Double, duration: Double, media: MediaItem, season: Int, episode: Int) {
+        // Films keep title-level history only: there is no "S1 · Episode 1" to resume.
+        guard media.isEpisodic else { return }
+        guard seconds.isFinite, seconds >= 0 else { return }
+        let fraction = (duration.isFinite && duration > 0) ? min(max(seconds / duration, 0), 1) : nil
+        updateEpisodeState(
+            mediaID: media.id,
+            season: season,
+            episode: episode,
+            progress: fraction,
+            resumeSeconds: seconds
+        )
+    }
+
+    /// Called when an episode finishes. Honors the "mark watched when finished"
+    /// setting so someone who prefers manual tracking is never overruled.
+    func markEpisodeFinished(media: MediaItem, season: Int, episode: Int) {
+        guard media.isEpisodic, settings.autoMarkWatchedOnFinish else { return }
+        setWatched(true, media: media, season: season, episode: episode)
+    }
+
+    /// The episode a title was last touched on, which is what Continue Watching
+    /// names and resumes.
+    func latestEpisodeState(for mediaID: String) -> EpisodeWatchState? {
+        episodeStates.values.filter { $0.mediaID == mediaID }.max { $0.updatedAt < $1.updatedAt }
+    }
+
+    /// 0...1 progress of a title's most recent episode, for Continue Watching. A
+    /// film falls back to its title-level entry, which is all it has.
+    func resumeProgress(for media: MediaItem) -> Double {
+        if let state = latestEpisodeState(for: media.id) {
+            return state.watched ? 1 : state.progress
+        }
+        return history.first { $0.id == media.id }?.progress ?? 0
+    }
+
+    /// "S1 · Episode 4" for a title with a remembered episode, so a rail can say
+    /// what "Continue" actually continues.
+    func resumeLabel(for media: MediaItem) -> String? {
+        guard let state = latestEpisodeState(for: media.id) else { return nil }
+        return "S\(state.season) · Episode \(state.episode)"
+    }
+
+    func hasResumePosition(for media: MediaItem) -> Bool {
+        episodeStates.values.contains { $0.mediaID == media.id && $0.isResumable }
+    }
+
+    private func updateEpisodeState(
+        mediaID: String,
+        season: Int,
+        episode: Int,
+        watched: Bool? = nil,
+        progress: Double? = nil,
+        resumeSeconds: Double? = nil
+    ) {
+        let key = EpisodeWatchState.key(mediaID: mediaID, season: season, episode: episode)
+        var state = episodeStates[key] ?? EpisodeWatchState(mediaID: mediaID, season: season, episode: episode)
+        if let watched { state.watched = watched }
+        if let progress { state.progress = min(max(progress, 0), 1) }
+        if let resumeSeconds { state.resumeSeconds = max(resumeSeconds, 0) }
+        // Finishing an episode clears its resume point; it is the one state that
+        // always agrees with itself.
+        if state.watched {
+            state.progress = 1
+            state.resumeSeconds = 0
+        }
+        state.updatedAt = Date()
+        episodeStates[key] = state
+    }
+
+    // MARK: - Episode metadata overrides
+
+    func hasOverride(media: MediaItem, season: Int, episode: Int) -> Bool {
+        episodeOverrides[EpisodeWatchState.key(mediaID: media.id, season: season, episode: episode)] != nil
+    }
+
+    var episodeOverrideCount: Int { episodeOverrides.count }
+
+    func episodeOverrideCount(for media: MediaItem) -> Int {
+        episodeOverrides.values.filter { $0.mediaID == media.id }.count
+    }
+
+    /// Saves the user's edits to one episode. Passing blanks (or clearing every
+    /// field) removes the override so the provider's own data shows again.
+    func setOverride(media: MediaItem, season: Int, episode: Int, name: String?, overview: String?, imageURL: URL?) {
+        let key = EpisodeWatchState.key(mediaID: media.id, season: season, episode: episode)
+        let override = EpisodeMetadataOverride(
+            mediaID: media.id,
+            season: season,
+            episode: episode,
+            name: Self.trimmedOrNil(name),
+            overview: Self.trimmedOrNil(overview),
+            imageURL: imageURL
+        )
+        if override.isEmpty {
+            episodeOverrides.removeValue(forKey: key)
+        } else {
+            episodeOverrides[key] = override
+        }
+    }
+
+    func clearOverride(media: MediaItem, season: Int, episode: Int) {
+        episodeOverrides.removeValue(forKey: EpisodeWatchState.key(mediaID: media.id, season: season, episode: episode))
+    }
+
+    /// Drops every edit for one title and reports how many were removed.
+    @discardableResult
+    func clearOverrides(for media: MediaItem) -> Int {
+        let keys = episodeOverrides.filter { $0.value.mediaID == media.id }.map(\.key)
+        keys.forEach { episodeOverrides.removeValue(forKey: $0) }
+        return keys.count
+    }
+
+    func clearAllEpisodeOverrides() {
+        episodeOverrides.removeAll()
+    }
+
+    /// Applies the user's saved edits to one episode row.
+    func applyOverride(to episode: EpisodeInfo, media: MediaItem, season: Int) -> EpisodeInfo {
+        guard let override = episodeOverrides[EpisodeWatchState.key(mediaID: media.id, season: season, episode: episode.number)] else { return episode }
+        return episode.applying(name: override.name, overview: override.overview, imageURL: override.imageURL)
+    }
+
+    /// Applies the user's saved edits to a whole catalog.
+    func applyOverrides(to seasons: [SeasonEpisodeInfo], media: MediaItem) -> [SeasonEpisodeInfo] {
+        guard !episodeOverrides.isEmpty else { return seasons }
+        return seasons.map { season in
+            var updated = season
+            updated.episodes = season.episodes.map { applyOverride(to: $0, media: media, season: season.season) }
+            return updated
+        }
+    }
+
+    private static func trimmedOrNil(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Removes a title from Continue Watching / watch history only. It stays in My List.

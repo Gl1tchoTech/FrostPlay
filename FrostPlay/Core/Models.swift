@@ -17,6 +17,14 @@ enum PlaybackFormat: Codable, Equatable {
     case embed(URL)
     case hls(URL)
     case mp4(URL)
+
+    /// The URL this format streams from, regardless of how it plays. Used to keep
+    /// the player's identity stable and to name what is actually on screen.
+    var streamURL: URL {
+        switch self {
+        case .embed(let url), .hls(let url), .mp4(let url): return url
+        }
+    }
 }
 
 struct MediaMetadata: Codable, Hashable {
@@ -69,6 +77,17 @@ struct MediaItem: Identifiable, Codable, Hashable {
     let year: String?
     let episodeCount: Int?
     var metadata: MediaMetadata? = nil
+
+    /// True when this title is tracked episode by episode. An anime film plays like
+    /// a movie even though its catalog comes from AniList, so it must never be
+    /// labelled "S1 · Episode 1" in Continue Watching.
+    var isEpisodic: Bool {
+        switch kind {
+        case .movie: return false
+        case .tv: return true
+        case .anime: return metadata?.format?.uppercased() != "MOVIE"
+        }
+    }
 
     static let preview = MediaItem(
         id: "preview-furiosa",
@@ -270,6 +289,53 @@ struct EpisodeInfo: Identifiable, Hashable, Codable {
     let imageURL: URL?
     var playbackURL: URL? = nil
     var id: Int { number }
+
+    /// True when a real per-episode title was published for this row. Providers
+    /// leave most rows as FrostPlay's generated "Episode N", and the UI says so
+    /// instead of repeating a title that carries no information.
+    var hasPublishedName: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != "Episode \(number)"
+    }
+
+    /// True when nothing in this row came from a provider: no title, no synopsis,
+    /// and no artwork. These are the rows the user can fill in by hand.
+    var hasNoDetails: Bool {
+        !hasPublishedName && overview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && imageURL == nil
+    }
+
+    /// Returns a copy with the user's per-episode edits applied. Only the fields
+    /// the user actually filled in are replaced; the episode number is never
+    /// editable because it is the key every other feature depends on.
+    func applying(name: String?, overview: String?, imageURL: URL?) -> EpisodeInfo {
+        EpisodeInfo(
+            number: number,
+            name: Self.cleaned(name) ?? self.name,
+            overview: Self.cleaned(overview) ?? self.overview,
+            airDate: airDate,
+            imageURL: imageURL ?? self.imageURL,
+            playbackURL: playbackURL
+        )
+    }
+
+    /// Fills this row's gaps from another provider's row without ever overwriting
+    /// details this row already published, and never changing its number.
+    func merged(with detail: EpisodeInfo) -> EpisodeInfo {
+        EpisodeInfo(
+            number: number,
+            name: hasPublishedName ? name : (detail.hasPublishedName ? detail.name : name),
+            overview: overview.isEmpty ? detail.overview : overview,
+            airDate: airDate ?? detail.airDate,
+            imageURL: imageURL ?? detail.imageURL,
+            playbackURL: playbackURL
+        )
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 struct SeasonEpisodeInfo: Identifiable, Hashable, Codable {
@@ -277,6 +343,155 @@ struct SeasonEpisodeInfo: Identifiable, Hashable, Codable {
     let episodeCount: Int
     var episodes: [EpisodeInfo] = []
     var id: Int { season }
+}
+
+/// One episode's watch state. Kept per episode (not per title) so a 200-episode
+/// anime can remember exactly where the user stopped inside each one, and so the
+/// player can resume instead of restarting.
+struct EpisodeWatchState: Identifiable, Codable, Hashable {
+    let id: String
+    let mediaID: String
+    let season: Int
+    let episode: Int
+    var watched: Bool
+    /// Playback progress 0...1, used by the episode rows and the progress bar.
+    var progress: Double
+    /// Resumable position in seconds, so the player can pick up mid-episode.
+    var resumeSeconds: Double
+    var updatedAt: Date
+
+    /// A position worth resuming from: partway in, not already finished.
+    var isResumable: Bool { !watched && resumeSeconds >= 15 && progress < 0.98 }
+
+    /// The stable key shared by watch state, metadata edits, and the UI.
+    static func key(mediaID: String, season: Int, episode: Int) -> String {
+        "\(mediaID)|\(season)|\(episode)"
+    }
+
+    init(mediaID: String, season: Int, episode: Int, watched: Bool = false, progress: Double = 0, resumeSeconds: Double = 0, updatedAt: Date = Date()) {
+        self.id = Self.key(mediaID: mediaID, season: season, episode: episode)
+        self.mediaID = mediaID
+        self.season = season
+        self.episode = episode
+        self.watched = watched
+        self.progress = progress
+        self.resumeSeconds = resumeSeconds
+        self.updatedAt = updatedAt
+    }
+
+    /// Hand-rolled so a stored value from an older build never fails to decode
+    /// when a field is added later.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mediaID = try container.decode(String.self, forKey: .mediaID)
+        season = try container.decodeIfPresent(Int.self, forKey: .season) ?? 1
+        episode = try container.decodeIfPresent(Int.self, forKey: .episode) ?? 1
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? Self.key(mediaID: mediaID, season: season, episode: episode)
+        watched = try container.decodeIfPresent(Bool.self, forKey: .watched) ?? false
+        progress = try container.decodeIfPresent(Double.self, forKey: .progress) ?? 0
+        resumeSeconds = try container.decodeIfPresent(Double.self, forKey: .resumeSeconds) ?? 0
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+}
+
+/// A user's manual correction to one episode's metadata. `season` and `episode`
+/// are part of the key and are never editable; only the display fields are. An
+/// empty field means "keep what the provider published".
+struct EpisodeMetadataOverride: Identifiable, Codable, Hashable {
+    let id: String
+    let mediaID: String
+    let season: Int
+    let episode: Int
+    var name: String?
+    var overview: String?
+    var imageURL: URL?
+    var updatedAt: Date
+
+    /// True when the override carries nothing and can be dropped.
+    var isEmpty: Bool {
+        name == nil && overview == nil && imageURL == nil
+    }
+
+    init(mediaID: String, season: Int, episode: Int, name: String? = nil, overview: String? = nil, imageURL: URL? = nil, updatedAt: Date = Date()) {
+        self.id = EpisodeWatchState.key(mediaID: mediaID, season: season, episode: episode)
+        self.mediaID = mediaID
+        self.season = season
+        self.episode = episode
+        self.name = name
+        self.overview = overview
+        self.imageURL = imageURL
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mediaID = try container.decode(String.self, forKey: .mediaID)
+        season = try container.decodeIfPresent(Int.self, forKey: .season) ?? 1
+        episode = try container.decodeIfPresent(Int.self, forKey: .episode) ?? 1
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? EpisodeWatchState.key(mediaID: mediaID, season: season, episode: episode)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        overview = try container.decodeIfPresent(String.self, forKey: .overview)
+        imageURL = try container.decodeIfPresent(URL.self, forKey: .imageURL)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+}
+
+/// Walks an episode catalog in order, including across season boundaries, so the
+/// player can auto-advance into the next season and know when a show is over.
+enum EpisodeSequencer {
+    struct Position: Equatable, Hashable {
+        let season: Int
+        let episode: Int
+
+        var label: String { "S\(season) · Episode \(episode)" }
+    }
+
+    /// The episode after `position`, crossing into the next season when this one
+    /// ends. `nil` means the show is finished.
+    static func next(in seasons: [SeasonEpisodeInfo], after position: Position) -> Position? {
+        let ordered = orderedSeasons(seasons)
+        guard let index = ordered.firstIndex(where: { $0.season == position.season }) else { return nil }
+        let numbers = episodeNumbers(of: ordered[index])
+        if let current = numbers.firstIndex(of: position.episode), current + 1 < numbers.count {
+            return Position(season: ordered[index].season, episode: numbers[current + 1])
+        }
+        guard index + 1 < ordered.count else { return nil }
+        let following = ordered[index + 1]
+        guard let first = episodeNumbers(of: following).first else { return nil }
+        return Position(season: following.season, episode: first)
+    }
+
+    /// The episode before `position`, crossing back into the previous season's
+    /// last episode when this one is its season's first.
+    static func previous(in seasons: [SeasonEpisodeInfo], before position: Position) -> Position? {
+        let ordered = orderedSeasons(seasons)
+        guard let index = ordered.firstIndex(where: { $0.season == position.season }) else { return nil }
+        let numbers = episodeNumbers(of: ordered[index])
+        if let current = numbers.firstIndex(of: position.episode), current > 0 {
+            return Position(season: ordered[index].season, episode: numbers[current - 1])
+        }
+        guard index > 0 else { return nil }
+        let preceding = ordered[index - 1]
+        guard let last = episodeNumbers(of: preceding).last else { return nil }
+        return Position(season: preceding.season, episode: last)
+    }
+
+    /// Every episode of a season in order, whether the catalog published real rows
+    /// or only an episode count.
+    static func episodeNumbers(of season: SeasonEpisodeInfo) -> [Int] {
+        if !season.episodes.isEmpty {
+            // De-duplicated: `EpisodeInfo.id` is its number, and a repeated number
+            // would give `ForEach` two rows with the same identity.
+            var seen = Set<Int>()
+            return season.episodes.map(\.number).filter { seen.insert($0).inserted }.sorted()
+        }
+        guard season.episodeCount > 0 else { return [] }
+        return Array(1...season.episodeCount)
+    }
+
+    private static func orderedSeasons(_ seasons: [SeasonEpisodeInfo]) -> [SeasonEpisodeInfo] {
+        seasons.filter { !episodeNumbers(of: $0).isEmpty }.sorted { $0.season < $1.season }
+    }
 }
 
 enum PlaybackSource: String, Codable, CaseIterable, Identifiable, Hashable {
@@ -396,12 +611,28 @@ struct FrostPlaySettings: Codable {
     /// air dates, and artwork. AniList stays authoritative for numbering.
     var kitsuEpisodeDetails = true
 
+    // MARK: Episodes
+
+    /// Opens the per-episode screen instead of jumping straight into the player.
+    var episodeDetailViewEnabled = true
+    /// Lets the episode screen correct an episode's title, synopsis, and artwork.
+    var episodeMetadataEditingEnabled = true
+    /// Long-pressing an episode row offers watched/unwatched actions.
+    var longPressMarksWatched = true
+    /// Marks an episode watched once playback passes `watchCompletionThreshold`.
+    var autoMarkWatchedOnFinish = true
+    /// How far through an episode counts as finished (0.5...0.99).
+    var watchCompletionThreshold = 0.9
+    /// Stops after the final episode instead of looping back to the first one.
+    var stopAfterLastEpisode = true
+
     enum CodingKeys: String, CodingKey {
         case tmdbAPIKey, tmdbReadAccessToken, theme, enabledSources, defaultAnimeSource, defaultMovieTVSource, preferredAnimeLanguage, selectedProvider, textScale, boldText, backgroundOpacity, backgroundBlur, lineSpacing, reduceMotion, showImageLogos, backdropTrailers, autoHideHeader, autoplayNextEpisode, autoSkipIntro, autoSubtitles, preferredQuality, subtitleUseNativePlayer, subtitleColor, homeSections, downloadsEnabled
         case listCoverStyle, showListCounts, showListAliases, confirmListDeletion
         case showLoadingPlaceholders, minimumPlaceholderSeconds
         case rotateHomeCatalog
         case kitsuEpisodeDetails
+        case episodeDetailViewEnabled, episodeMetadataEditingEnabled, longPressMarksWatched, autoMarkWatchedOnFinish, watchCompletionThreshold, stopAfterLastEpisode
     }
 
     /// The source that should be tried first for a title type, always guaranteed to
@@ -450,6 +681,13 @@ struct FrostPlaySettings: Codable {
         minimumPlaceholderSeconds = try container.decodeIfPresent(Double.self, forKey: .minimumPlaceholderSeconds) ?? defaults.minimumPlaceholderSeconds
         rotateHomeCatalog = try container.decodeIfPresent(Bool.self, forKey: .rotateHomeCatalog) ?? defaults.rotateHomeCatalog
         kitsuEpisodeDetails = try container.decodeIfPresent(Bool.self, forKey: .kitsuEpisodeDetails) ?? defaults.kitsuEpisodeDetails
+        episodeDetailViewEnabled = try container.decodeIfPresent(Bool.self, forKey: .episodeDetailViewEnabled) ?? defaults.episodeDetailViewEnabled
+        episodeMetadataEditingEnabled = try container.decodeIfPresent(Bool.self, forKey: .episodeMetadataEditingEnabled) ?? defaults.episodeMetadataEditingEnabled
+        longPressMarksWatched = try container.decodeIfPresent(Bool.self, forKey: .longPressMarksWatched) ?? defaults.longPressMarksWatched
+        autoMarkWatchedOnFinish = try container.decodeIfPresent(Bool.self, forKey: .autoMarkWatchedOnFinish) ?? defaults.autoMarkWatchedOnFinish
+        let threshold = try container.decodeIfPresent(Double.self, forKey: .watchCompletionThreshold) ?? defaults.watchCompletionThreshold
+        watchCompletionThreshold = min(max(threshold, 0.5), 0.99)
+        stopAfterLastEpisode = try container.decodeIfPresent(Bool.self, forKey: .stopAfterLastEpisode) ?? defaults.stopAfterLastEpisode
     }
 }
 

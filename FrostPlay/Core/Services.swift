@@ -991,48 +991,61 @@ enum EpisodeDetailsMerger {
     /// MegaPlay playback URL. Kitsu only contributes display data it actually has,
     /// and never replaces a title AniList already published.
     static func merge(base: [EpisodeInfo], details: [EpisodeInfo], expectedCount: Int?) -> [EpisodeInfo] {
+        guard !details.isEmpty else { return padded(base, expectedCount: expectedCount).sorted { $0.number < $1.number } }
+
         var detailByNumber: [Int: EpisodeInfo] = [:]
         for detail in details where detailByNumber[detail.number] == nil {
             detailByNumber[detail.number] = detail
         }
 
-        var merged = base.map { row -> EpisodeInfo in
-            guard let detail = detailByNumber[row.number] else { return row }
-            return EpisodeInfo(
-                number: row.number,
-                name: isPlaceholder(row.name, number: row.number) ? detail.name : row.name,
-                overview: row.overview.isEmpty ? detail.overview : row.overview,
-                airDate: row.airDate ?? detail.airDate,
-                imageURL: row.imageURL ?? detail.imageURL,
-                playbackURL: row.playbackURL
-            )
+        var merged: [EpisodeInfo] = []
+        var usedDetailNumbers = Set<Int>()
+        for row in base {
+            guard let detail = detailByNumber[row.number] else {
+                merged.append(row)
+                continue
+            }
+            usedDetailNumbers.insert(detail.number)
+            merged.append(row.merged(with: detail))
         }
 
+        // Second pass: Kitsu numbers its own episodes, and that numbering does not
+        // always line up with AniList's (absolute vs. per-season counts, specials,
+        // split cours). Every row still carrying FrostPlay's generated label takes
+        // the next unclaimed Kitsu row in order, so a numbering mismatch enriches
+        // the list instead of leaving a whole season as "Episode N".
+        var spare = details.filter { !usedDetailNumbers.contains($0.number) }
+        for index in merged.indices where merged[index].hasNoDetails {
+            // Only spend a Kitsu row that actually published something.
+            guard let position = spare.firstIndex(where: { !$0.hasNoDetails }) else { break }
+            let detail = spare.remove(at: position)
+            usedDetailNumbers.insert(detail.number)
+            merged[index] = merged[index].merged(with: detail)
+        }
+
+        // Kitsu sometimes describes episodes beyond the count AniList reported.
         var covered = Set(merged.map(\.number))
-        for detail in details where !covered.contains(detail.number) {
+        for detail in details where !usedDetailNumbers.contains(detail.number) && !covered.contains(detail.number) {
             merged.append(detail)
             covered.insert(detail.number)
         }
 
-        // Only pad when the caller knows the title has more episodes than we could
-        // describe, so the count AniList reported is still honored.
-        if let expectedCount {
-            let target = min(max(expectedCount, merged.count), 2_000)
-            if target > merged.count {
-                for number in 1...target where !covered.contains(number) {
-                    merged.append(
-                        EpisodeInfo(number: number, name: "Episode \(number)", overview: "", airDate: nil, imageURL: nil)
-                    )
-                }
-            }
-        }
-        return merged.sorted { $0.number < $1.number }
+        return padded(merged, expectedCount: expectedCount).sorted { $0.number < $1.number }
     }
 
-    /// True when a row still carries FrostPlay's generated "Episode N" label.
-    private static func isPlaceholder(_ name: String, number: Int) -> Bool {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty || trimmed == "Episode \(number)"
+    /// Fills the gaps up to the count the catalog owner reported, so a title with
+    /// 1,100 episodes still lists 1,100 rows.
+    private static func padded(_ rows: [EpisodeInfo], expectedCount: Int?) -> [EpisodeInfo] {
+        guard let expectedCount, expectedCount > rows.count else { return rows }
+        let target = min(max(expectedCount, rows.count), 2_000)
+        guard target > rows.count else { return rows }
+        var padded = rows
+        var covered = Set(padded.map(\.number))
+        for number in 1...target where !covered.contains(number) {
+            padded.append(EpisodeInfo(number: number, name: "Episode \(number)", overview: "", airDate: nil, imageURL: nil))
+            covered.insert(number)
+        }
+        return padded
     }
 }
 
