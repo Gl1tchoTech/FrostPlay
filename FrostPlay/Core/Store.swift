@@ -623,12 +623,12 @@ final class FrostPlayStore: ObservableObject {
         episodeState(mediaID: media.id, season: season, episode: episode)
     }
 
-    func isWatched(_ media: MediaItem, season: Int, episode: Int) -> Bool {
+    func isWatched(media: MediaItem, season: Int, episode: Int) -> Bool {
         episodeState(media: media, season: season, episode: episode)?.watched ?? false
     }
 
     /// 0...1 progress of one episode, used by its row and its detail screen.
-    func episodeProgress(_ media: MediaItem, season: Int, episode: Int) -> Double {
+    func episodeProgress(media: MediaItem, season: Int, episode: Int) -> Double {
         episodeState(media: media, season: season, episode: episode)?.progress ?? 0
     }
 
@@ -651,7 +651,7 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func toggleWatched(media: MediaItem, season: Int, episode: Int) {
-        setWatched(!isWatched(media, season: season, episode: episode), media: media, season: season, episode: episode)
+        setWatched(!isWatched(media: media, season: season, episode: episode), media: media, season: season, episode: episode)
     }
 
     /// Marks this episode and every earlier one in the season watched, so catching
@@ -663,7 +663,7 @@ final class FrostPlayStore: ObservableObject {
     }
 
     func watchedCount(media: MediaItem, season: Int, episodes: [EpisodeInfo]) -> Int {
-        episodes.reduce(0) { $0 + (isWatched(media, season: season, episode: $1.number) ? 1 : 0) }
+        episodes.reduce(0) { $0 + (isWatched(media: media, season: season, episode: $1.number) ? 1 : 0) }
     }
 
     /// Stores where playback is, both as a fraction (for the UI) and in seconds
