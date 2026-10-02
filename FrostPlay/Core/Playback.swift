@@ -35,6 +35,26 @@ enum EmbedURL {
         }
     }
 
+    /// The direct-stream format a URL denotes, if any: an HLS playlist or a
+    /// progressive file. Anything else — an embed page, a segment, a key — is not
+    /// a stream FrostPlay can play or save on its own.
+    static func directFormat(for url: URL) -> PlaybackFormat? {
+        let path = url.path.lowercased()
+        if path.hasSuffix(".m3u8") { return .hls(url) }
+        if path.hasSuffix(".mp4") || path.hasSuffix(".m4v") || path.hasSuffix(".mov") { return .mp4(url) }
+        return nil
+    }
+
+    /// A direct stream URL reported by an embed's own player. Only HTTPS URLs that
+    /// are a playlist or progressive file are believed; the CDN host is unknown in
+    /// advance, so it cannot be checked against `trustedHosts`.
+    static func reportedStreamURL(from rawValue: String) -> URL? {
+        guard let url = URL(string: rawValue), url.scheme?.lowercased() == "https" else { return nil }
+        if case .hls(let stream) = directFormat(for: url) { return stream }
+        if case .mp4(let stream) = directFormat(for: url) { return stream }
+        return nil
+    }
+
     /// The source an embed belongs to, so the player can name the right one.
     static func source(hosting url: URL) -> PlaybackSource? {
         guard let host = url.host?.lowercased() else { return nil }
@@ -62,6 +82,13 @@ struct PlaybackResolver {
         // movies/TV -> VidLink/MoviesAPI. A TMDB title can never attempt MegaPlay.
         let allowed = PlaybackSource.allowed(for: media.kind)
         guard !allowed.isEmpty else { return nil }
+
+        // A preferred URL may itself be a direct stream — an .m3u8 playlist or a
+        // progressive file — rather than an embed. Those are played directly and,
+        // unlike an embed, can be saved for offline playback.
+        if let preferredURL, let direct = EmbedURL.directFormat(for: preferredURL) {
+            return ResolvedPlayback(source: settings.defaultSource(for: media.kind), format: direct)
+        }
 
         // A prefilled MegaPlay URL is only trusted for anime titles.
         if media.kind == .anime,
@@ -113,6 +140,10 @@ struct PlaybackResolver {
 enum EmbedPlaybackEvent {
     case finished
     case progress(seconds: Double, duration: Double)
+    /// The embed's own player requested a direct stream — an HLS playlist or a
+    /// progressive file. Forwarded so the title can be saved for offline playback
+    /// even though the source only ever handed FrostPlay an embed page.
+    case stream(URL)
 }
 
 struct HybridPlayer: View {
@@ -122,6 +153,8 @@ struct HybridPlayer: View {
     var resumeSeconds: Double = 0
     var onFinished: (() -> Void)? = nil
     var onProgress: ((Double, Double) -> Void)? = nil
+    /// Receives a direct stream URL an embed discovered while it was playing.
+    var onStream: ((URL) -> Void)? = nil
 
     var body: some View {
         switch format {
@@ -133,6 +166,7 @@ struct HybridPlayer: View {
                     switch event {
                     case .finished: onFinished?()
                     case .progress(let seconds, let duration): onProgress?(seconds, duration)
+                    case .stream(let streamURL): onStream?(streamURL)
                     }
                 }
             )
@@ -261,6 +295,10 @@ struct EmbedPlayer: UIViewRepresentable {
                 if seconds.isFinite, duration.isFinite, duration > 0 {
                     onEvent?(.progress(seconds: seconds, duration: duration))
                 }
+            case "stream":
+                if let raw = body["url"] as? String, let streamURL = EmbedURL.reportedStreamURL(from: raw) {
+                    onEvent?(.stream(streamURL))
+                }
             default:
                 break
             }
@@ -346,6 +384,70 @@ struct EmbedPlayer: UIViewRepresentable {
       function send(payload) {
         try { window.webkit.messageHandlers.__HANDLER__.postMessage(payload); } catch (error) {}
       }
+      // --- Direct stream discovery ------------------------------------------
+      // The embed's own player has to request the real media eventually: an HLS
+      // playlist (.m3u8) or a progressive file (.mp4). This script is injected
+      // into every frame of the embed, so it can watch those requests and forward
+      // the URL, letting FrostPlay save the title for offline playback even though
+      // the source only ever handed it an embed page.
+      var reported = {};
+      function report(candidate) {
+        if (typeof candidate !== 'string' || !candidate) return;
+        var url;
+        try { url = new URL(candidate, location.href); } catch (error) { return; }
+        if (url.protocol !== 'https:') return;
+        var path = url.pathname.toLowerCase();
+        var interesting = path.indexOf('.m3u8') !== -1 || path.indexOf('.mp4') !== -1 || path.indexOf('.m4v') !== -1 || path.indexOf('.mov') !== -1;
+        if (!interesting || reported[url.href]) return;
+        reported[url.href] = true;
+        send({ event: 'stream', url: url.href });
+      }
+      try {
+        var originalFetch = window.fetch;
+        if (typeof originalFetch === 'function') {
+          window.fetch = function (input) {
+            try { report(typeof input === 'string' ? input : (input && input.url)); } catch (error) {}
+            return originalFetch.apply(this, arguments);
+          };
+        }
+      } catch (error) {}
+      try {
+        var originalOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (method, requestURL) {
+          try { report(requestURL); } catch (error) {}
+          return originalOpen.apply(this, arguments);
+        };
+      } catch (error) {}
+      try {
+        var mediaSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+        if (mediaSrc && mediaSrc.set) {
+          Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+            configurable: true,
+            enumerable: mediaSrc.enumerable,
+            get: mediaSrc.get,
+            set: function (value) {
+              try { report(value); } catch (error) {}
+              return mediaSrc.set.call(this, value);
+            }
+          });
+        }
+      } catch (error) {}
+      try {
+        var originalSetAttribute = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          try { if (String(name).toLowerCase() === 'src') report(value); } catch (error) {}
+          return originalSetAttribute.apply(this, arguments);
+        };
+      } catch (error) {}
+      // Fallback for players that build the request internally: the resource
+      // timing buffer still records every URL this frame fetched.
+      function scanResources() {
+        try {
+          var entries = performance.getEntriesByType ? performance.getEntriesByType('resource') : [];
+          for (var i = 0; i < entries.length; i++) { report(entries[i].name); }
+        } catch (error) {}
+      }
+      setInterval(scanResources, 4000);
       function interpret(data) {
         if (typeof data === 'string') {
           try { data = JSON.parse(data); } catch (error) { return; }
@@ -381,16 +483,94 @@ struct EmbedPlayer: UIViewRepresentable {
 }
 
 struct AuthorizedDownloadManager {
+    /// Only a directly addressable stream can be saved. An embed is a third-party
+    /// iframe with no downloadable URL, so it is deliberately excluded.
     static func downloadableURL(for format: PlaybackFormat) -> URL? {
         switch format {
-        case .mp4(let url): return url
-        case .hls, .embed: return nil
+        case .mp4(let url), .hls(let url): return url
+        case .embed: return nil
         }
+    }
+
+    static func canDownload(for format: PlaybackFormat) -> Bool {
+        downloadableURL(for: format) != nil
+    }
+
+    static func isHLS(_ format: PlaybackFormat) -> Bool {
+        if case .hls = format { return true }
+        return false
     }
 
     static func fileName(for media: MediaItem, episode: Int? = nil) -> String {
         let safeTitle = media.title.replacingOccurrences(of: "[^A-Za-z0-9 ]", with: "", options: .regularExpression)
         let suffix = episode.map { " - Episode \($0)" } ?? ""
         return "\(safeTitle)\(suffix).mp4"
+    }
+}
+
+/// Saves HLS (`.m3u8`) streams for offline playback with Apple's asset download
+/// API, the only App Store-safe way to store a segmented stream. A finished asset
+/// is an on-disk bundle whose path can change between launches, so it is reopened
+/// from a bookmark (see `DownloadEntry.bookmarkData`) instead of a fixed URL.
+final class HLSDownloadManager: NSObject, AVAssetDownloadDelegate {
+    static let shared = HLSDownloadManager()
+
+    /// Reports 0...1 progress for an in-flight download, keyed by FrostPlay's id.
+    var onProgress: ((String, Double) -> Void)?
+    /// Reports the on-disk location of a finished asset.
+    var onFinish: ((String, URL) -> Void)?
+    /// Reports a failed or cancelled download.
+    var onFailure: ((String, Error?) -> Void)?
+
+    private var tasks: [String: AVAssetDownloadTask] = [:]
+
+    private lazy var session: AVAssetDownloadURLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: "com.gl1tchotech.frostplay.hls")
+        return AVAssetDownloadURLSession(configuration: configuration, assetDownloadDelegate: self, delegateQueue: .main)
+    }()
+
+    func start(id: String, url: URL) {
+        guard tasks[id] == nil else { return }
+        let asset = AVURLAsset(url: url)
+        guard let task = session.makeAssetDownloadTask(asset: asset, assetTitle: id, assetArtworkData: nil, options: nil) else {
+            onFailure?(id, nil)
+            return
+        }
+        task.taskDescription = id
+        tasks[id] = task
+        task.resume()
+    }
+
+    func cancel(id: String) {
+        tasks[id]?.cancel()
+        tasks[id] = nil
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        assetDownloadTask: AVAssetDownloadTask,
+        didLoad timeRange: CMTimeRange,
+        totalTimeRangesLoaded loadedTimeRanges: [NSValue],
+        timeRangeExpectedToLoad: CMTimeRange
+    ) {
+        guard let id = assetDownloadTask.taskDescription else { return }
+        let expected = timeRangeExpectedToLoad.duration.seconds
+        guard expected.isFinite, expected > 0 else { return }
+        let loaded = loadedTimeRanges.reduce(0.0) { $0 + $1.timeRangeValue.duration.seconds }
+        onProgress?(id, min(max(loaded / expected, 0), 1))
+    }
+
+    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let id = assetDownloadTask.taskDescription else { return }
+        tasks[id] = nil
+        onFinish?(id, location)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // A completed task also reaches this point with a nil error; only a real
+        // failure (including cancellation) should clear the pending download.
+        guard let error, let id = task.taskDescription else { return }
+        tasks[id] = nil
+        onFailure?(id, error)
     }
 }

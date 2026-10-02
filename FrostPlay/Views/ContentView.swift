@@ -682,6 +682,21 @@ struct LibraryView: View {
     @EnvironmentObject private var store: FrostPlayStore
     @State private var section = "Lists"
     @State private var showingNewList = false
+    @State private var renameTarget: MediaCollection?
+    @State private var renameDraft = ""
+    @State private var coverTarget: MediaCollection?
+    @State private var addTarget: MediaCollection?
+    @State private var deleteTarget: MediaCollection?
+
+    /// Drives the list-rename alert off the list that is being renamed.
+    private var renameAlertBinding: Binding<Bool> {
+        Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })
+    }
+
+    /// Drives the delete confirmation off the list that is being removed.
+    private var deleteConfirmBinding: Binding<Bool> {
+        Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })
+    }
 
     private var backdrop: MediaItem? {
         section == "Lists" ? store.library.first : store.downloads.first?.media
@@ -721,6 +736,31 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $showingNewList) { NewCollectionSheet() }
         }
+        .sheet(item: $coverTarget) { CollectionArtworkPicker(collectionID: $0.id) }
+        .sheet(item: $addTarget) { CollectionAddTitlesSheet(collectionID: $0.id) }
+        .alert("Rename list", isPresented: renameAlertBinding, presenting: renameTarget) { item in
+            TextField("List name", text: $renameDraft)
+            Button("Save") { store.renameCollection(item.id, to: renameDraft) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This name appears everywhere the list is shown.")
+        }
+        .confirmationDialog(
+            deleteTarget.map { "Delete \"\($0.name)\"?" } ?? "Delete this list?",
+            isPresented: deleteConfirmBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Delete list", role: .destructive) {
+                if let target = deleteTarget {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        store.deleteCollection(target.id)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its titles stay in your other lists and in your watch history.")
+        }
         .preferredColorScheme(.dark)
     }
 
@@ -741,9 +781,48 @@ struct LibraryView: View {
                     CollectionCard(collection: collection)
                 }
                 .buttonStyle(FrostPressStyle(scale: 0.985))
+                .contextMenu { listMenu(for: collection) }
             }
             Button { showingNewList = true } label: { NewCollectionCard() }
                 .buttonStyle(FrostPressStyle(scale: 0.985))
+        }
+    }
+
+    /// The long-press menu on a saved list: rename it, edit its cover, add titles,
+    /// or delete it (behind a confirmation).
+    @ViewBuilder
+    private func listMenu(for collection: MediaCollection) -> some View {
+        Button {
+            renameDraft = collection.name
+            renameTarget = collection
+        } label: {
+            Label("Rename", systemImage: "textformat")
+        }
+        Button {
+            coverTarget = collection
+        } label: {
+            Label("Edit cover", systemImage: "photo.on.rectangle.angled")
+        }
+        Button {
+            addTarget = collection
+        } label: {
+            Label("Add titles", systemImage: "plus")
+        }
+        Button {
+            store.setArtworkStyle(.automatic, for: collection.id)
+        } label: {
+            Label("Reset cover", systemImage: "wand.and.stars")
+        }
+        if !collection.isBuiltIn {
+            Button(role: .destructive) {
+                if store.settings.confirmListDeletion {
+                    deleteTarget = collection
+                } else {
+                    store.deleteCollection(collection.id)
+                }
+            } label: {
+                Label("Delete list", systemImage: "trash")
+            }
         }
     }
 }
@@ -943,6 +1022,7 @@ struct CollectionDetailView: View {
     @State private var aliasDraft = ""
     @State private var showingDelete = false
     @State private var showingAdd = false
+    @State private var removeTarget: CollectionEntry?
 
     private var collection: MediaCollection? { store.collection(id: collectionID) }
 
@@ -951,6 +1031,14 @@ struct CollectionDetailView: View {
         Binding(
             get: { renameTarget != nil },
             set: { if !$0 { renameTarget = nil } }
+        )
+    }
+
+    /// Drives the remove-from-list confirmation off the entry being removed.
+    private var removeConfirmBinding: Binding<Bool> {
+        Binding(
+            get: { removeTarget != nil },
+            set: { if !$0 { removeTarget = nil } }
         )
     }
 
@@ -1030,6 +1118,20 @@ struct CollectionDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Its titles stay in your other lists and in your watch history.")
+        }
+        .confirmationDialog(
+            removeTarget.map { "Remove \"\($0.displayTitle)\"?" } ?? "Remove from list?",
+            isPresented: removeConfirmBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                if let entry = removeTarget {
+                    store.remove(entry.media, from: collectionID)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The title stays in your other lists and watch history.")
         }
     }
 
@@ -1130,24 +1232,7 @@ struct CollectionDetailView: View {
             .buttonStyle(.plain)
 
             Menu {
-                Button {
-                    aliasDraft = entry.alias ?? entry.media.title
-                    renameTarget = entry
-                } label: {
-                    Label("Rename in this list", systemImage: "pencil")
-                }
-                if entry.isRenamed {
-                    Button {
-                        store.setAlias(nil, for: entry.media.id, in: collection.id)
-                    } label: {
-                        Label("Use original title", systemImage: "arrow.uturn.backward")
-                    }
-                }
-                Button(role: .destructive) {
-                    store.remove(entry.media, from: collection.id)
-                } label: {
-                    Label("Remove from list", systemImage: "minus.circle")
-                }
+                entryMenu(for: entry, in: collection)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
@@ -1157,6 +1242,31 @@ struct CollectionDetailView: View {
         }
         .padding(11)
         .frostGlass(cornerRadius: 16, opacity: 0.85)
+        .contextMenu { entryMenu(for: entry, in: collection) }
+    }
+
+    /// The long-press menu on a saved title: rename it inside this list, restore
+    /// its real name, or remove it (behind a confirmation).
+    @ViewBuilder
+    private func entryMenu(for entry: CollectionEntry, in collection: MediaCollection) -> some View {
+        Button {
+            aliasDraft = entry.alias ?? entry.media.title
+            renameTarget = entry
+        } label: {
+            Label("Rename in this list", systemImage: "pencil")
+        }
+        if entry.isRenamed {
+            Button {
+                store.setAlias(nil, for: entry.media.id, in: collection.id)
+            } label: {
+                Label("Use original title", systemImage: "arrow.uturn.backward")
+            }
+        }
+        Button(role: .destructive) {
+            removeTarget = entry
+        } label: {
+            Label("Remove from list", systemImage: "minus.circle")
+        }
     }
 }
 
@@ -1323,11 +1433,11 @@ struct DownloadsList: View {
     @EnvironmentObject private var store: FrostPlayStore
     var body: some View {
         if store.downloads.isEmpty {
-            ContentUnavailableView("No downloads", systemImage: "arrow.down.circle", description: Text("Direct MP4 files appear here when a source explicitly permits downloading."))
+            ContentUnavailableView("No downloads", systemImage: "arrow.down.circle", description: Text("Titles you save for offline playback appear here. Tap download in the player while a direct stream is playing."))
         } else {
             LazyVStack(spacing: 10) {
                 ForEach(store.downloads) { entry in
-                    NavigationLink(destination: DirectVideoPlayer(url: entry.localURL).navigationTitle(entry.media.title)) {
+                    NavigationLink(destination: DirectVideoPlayer(url: entry.playbackURL).navigationTitle(entry.media.title)) {
                         HStack(spacing: 12) {
                             Poster(url: entry.media.posterURL, width: 60, height: 82)
                             VStack(alignment: .leading, spacing: 5) {
@@ -1336,7 +1446,12 @@ struct DownloadsList: View {
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                                     .foregroundStyle(.white)
-                                Text(entry.episode.map { "Episode \($0)" } ?? "Movie").font(.caption).foregroundStyle(.secondary)
+                                Text("\(entry.episode.map { "Episode \($0)" } ?? "Movie") · \(entry.isHLS == true ? "HLS" : "MP4")")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Label("Available offline", systemImage: "checkmark.circle.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(frostOrange)
                                 Text(entry.fileName).font(.caption2).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
                             }
                             Spacer()
@@ -2549,6 +2664,9 @@ struct PlayerView: View {
     @State private var lastRecordedAt: Date = .distantPast
     /// Manual replays rebuild the player without changing the episode.
     @State private var playerToken = UUID()
+    /// A direct stream URL the embed's own player was observed requesting. It is
+    /// what makes an embed-based source savable for offline playback.
+    @State private var discoveredStream: URL?
     private let resolver = PlaybackResolver()
     /// How long the "up next" bar waits before switching episodes.
     private let advanceCountdownSeconds = 10
@@ -2565,6 +2683,15 @@ struct PlayerView: View {
 
     private var resolvedPlayback: ResolvedPlayback? {
         resolver.resolveSource(media: media, settings: store.settings, season: season, episode: episode, preferredURL: preferredURL)
+    }
+
+    /// The stream to offer for offline saving. A source that already resolved to a
+    /// file keeps working as before; an embed has no URL of its own, so it becomes
+    /// savable once its player is seen requesting the real .m3u8/.mp4.
+    private var downloadableFormat: PlaybackFormat? {
+        if let discoveredStream, let direct = EmbedURL.directFormat(for: discoveredStream) { return direct }
+        guard let format = resolvedPlayback?.format, AuthorizedDownloadManager.canDownload(for: format) else { return nil }
+        return format
     }
 
     /// Identity for the player subtree: a new episode, a new source, or a replay
@@ -2590,17 +2717,13 @@ struct PlayerView: View {
                     source: resolvedPlayback?.source,
                     resumeSeconds: store.resumeSeconds(for: media, season: season, episode: episode),
                     onFinished: { handleFinished() },
-                    onProgress: { seconds, duration in handleProgress(seconds: seconds, duration: duration) }
+                    onProgress: { seconds, duration in handleProgress(seconds: seconds, duration: duration) },
+                    onStream: { url in discoveredStream = url }
                 )
                 .id(playerIdentity)
                 .frame(maxHeight: .infinity)
-                if AuthorizedDownloadManager.downloadableURL(for: format) != nil {
-                    Button { Task { try? await store.download(media: media, format: format, episode: media.isEpisodic ? episode : nil) } } label: {
-                        FrostActionLabel(title: "Download MP4", systemImage: "arrow.down.circle.fill", subtitle: "Save this file for offline playback", prominent: true)
-                    }
-                    .buttonStyle(FrostPressStyle())
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                if let downloadFormat = downloadableFormat {
+                    offlineDownloadButton(for: downloadFormat)
                 }
             } else {
                 ContentUnavailableView("No source available", systemImage: "exclamationmark.triangle", description: Text("Pick a different source for this title type."))
@@ -2613,6 +2736,7 @@ struct PlayerView: View {
         .overlay(alignment: .bottom) { advanceOverlay }
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: pendingNext)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: isFinished)
+        .onChange(of: playerIdentity) { _, _ in discoveredStream = nil }
         .onAppear { store.recordWatch(media, season: season, episode: episode) }
         .onDisappear(perform: recordCompletionIfNeeded)
         .task(id: media.id) { await loadCatalogIfNeeded() }
@@ -2621,6 +2745,47 @@ struct PlayerView: View {
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
+    }
+
+    /// The offline-save action for a direct stream: a download button, live HLS
+    /// progress while saving, or a confirmation once the title is on disk.
+    @ViewBuilder
+    private func offlineDownloadButton(for format: PlaybackFormat) -> some View {
+        let episodeNumber = media.isEpisodic ? episode : nil
+        let downloadID = FrostPlayStore.downloadID(for: media, episode: episodeNumber)
+        if store.isDownloaded(media: media, episode: episodeNumber) {
+            FrostActionLabel(
+                title: "Saved for offline",
+                systemImage: "checkmark.circle.fill",
+                subtitle: "Plays from Downloads with no connection",
+                prominent: true
+            )
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        } else if let progress = store.downloadProgress[downloadID] {
+            FrostActionLabel(
+                title: "Downloading… \(Int((progress * 100).rounded()))%",
+                systemImage: "arrow.down.circle",
+                subtitle: "Saving this title for offline playback",
+                prominent: true
+            )
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        } else {
+            Button {
+                Task { try? await store.download(media: media, format: format, episode: episodeNumber) }
+            } label: {
+                FrostActionLabel(
+                    title: AuthorizedDownloadManager.isHLS(format) ? "Download for Offline" : "Download MP4",
+                    systemImage: "arrow.down.circle.fill",
+                    subtitle: "Save this title for offline playback",
+                    prominent: true
+                )
+            }
+            .buttonStyle(FrostPressStyle())
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
     }
 
     private var header: some View {

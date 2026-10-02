@@ -119,6 +119,22 @@ struct DownloadEntry: Identifiable, Codable, Hashable {
     let localURL: URL
     let downloadedAt: Date
     let episode: Int?
+    /// True for a segmented HLS stream saved with AVAssetDownloadTask. It is
+    /// stored as an on-disk asset bundle rather than one file, so playback goes
+    /// through `bookmarkData` instead of `localURL`. Optional so downloads saved
+    /// by an older build still decode as direct files.
+    var isHLS: Bool? = nil
+    /// A bookmark to the finished HLS asset. Apple's asset downloader moves the
+    /// bundle between launches, so a fixed path is not reliable for playback.
+    var bookmarkData: Data? = nil
+
+    /// The URL AVPlayer should open. HLS assets are reopened from their bookmark
+    /// (falling back to the saved path if the bookmark can no longer be resolved).
+    var playbackURL: URL {
+        guard isHLS == true, let bookmarkData else { return localURL }
+        var stale = false
+        return (try? URL(resolvingBookmarkData: bookmarkData, bookmarkDataIsStale: &stale)) ?? localURL
+    }
 }
 
 /// One saved title inside a list. `alias` is a per-list display name, so renaming

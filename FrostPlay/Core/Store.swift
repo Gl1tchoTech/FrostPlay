@@ -20,6 +20,12 @@ final class FrostPlayStore: ObservableObject {
     @Published private(set) var collections: [MediaCollection] { didSet { save(collections, key: "collections") } }
     @Published private(set) var history: [WatchEntry] { didSet { save(history, key: "history") } }
     @Published private(set) var downloads: [DownloadEntry] { didSet { save(downloads, key: "downloads") } }
+    /// Transient 0...1 progress for in-flight HLS downloads, keyed by download id.
+    /// Never persisted: it only drives the player's offline button while saving.
+    @Published private(set) var downloadProgress: [String: Double] = [:]
+    /// Titles waiting on an in-flight HLS download so the finished asset can be
+    /// recorded against the right movie or episode.
+    private var pendingHLSDownloads: [String: (media: MediaItem, episode: Int?)] = [:]
     /// Per-episode watch state, keyed by "mediaID|season|episode". Titles store
     /// their own coarse history; this remembers each episode's watched flag, its
     /// progress, and where to resume.
@@ -111,6 +117,21 @@ final class FrostPlayStore: ObservableObject {
         episodeStates = Self.load([String: EpisodeWatchState].self, key: "episodeStates") ?? [:]
         episodeOverrides = Self.load([String: EpisodeMetadataOverride].self, key: "episodeOverrides") ?? [:]
         metadataSources = Self.load([String: MetadataSourceMode].self, key: "metadataSources") ?? [:]
+
+        // HLS downloads finish asynchronously on a shared session, so route its
+        // progress and completion back into this store once, here.
+        HLSDownloadManager.shared.onProgress = { [weak self] id, value in
+            Task { @MainActor in self?.downloadProgress[id] = value }
+        }
+        HLSDownloadManager.shared.onFinish = { [weak self] id, location in
+            Task { @MainActor in self?.finishHLSDownload(id: id, location: location) }
+        }
+        HLSDownloadManager.shared.onFailure = { [weak self] id, _ in
+            Task { @MainActor in
+                self?.pendingHLSDownloads[id] = nil
+                self?.downloadProgress[id] = nil
+            }
+        }
     }
 
     func loadHome() async {
@@ -587,8 +608,35 @@ final class FrostPlayStore: ObservableObject {
 
     func isInLibrary(_ media: MediaItem) -> Bool { library.contains(media) }
 
+    /// One download per movie or episode, so the same title can never be saved
+    /// twice under a different key.
+    static func downloadID(for media: MediaItem, episode: Int?) -> String {
+        "\(media.id)-\(episode.map(String.init) ?? "movie")"
+    }
+
+    func isDownloaded(media: MediaItem, episode: Int? = nil) -> Bool {
+        downloads.contains { $0.id == Self.downloadID(for: media, episode: episode) }
+    }
+
+    func isDownloading(media: MediaItem, episode: Int? = nil) -> Bool {
+        downloadProgress[Self.downloadID(for: media, episode: episode)] != nil
+    }
+
+    /// Saves a directly addressable stream for offline playback. A direct MP4 is
+    /// fetched to a file; an HLS stream is handed to AVAssetDownloadTask and
+    /// recorded when it finishes. Embeds have no downloadable URL and return early.
     func download(media: MediaItem, format: PlaybackFormat, episode: Int? = nil) async throws {
-        guard settings.downloadsEnabled, let sourceURL = AuthorizedDownloadManager.downloadableURL(for: format) else { return }
+        guard settings.downloadsEnabled,
+              let sourceURL = AuthorizedDownloadManager.downloadableURL(for: format) else { return }
+        let id = Self.downloadID(for: media, episode: episode)
+
+        if AuthorizedDownloadManager.isHLS(format) {
+            pendingHLSDownloads[id] = (media, episode)
+            downloadProgress[id] = 0
+            HLSDownloadManager.shared.start(id: id, url: sourceURL)
+            return
+        }
+
         let (temporaryURL, response) = try await URLSession.shared.download(from: sourceURL)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return }
         let fileName = AuthorizedDownloadManager.fileName(for: media, episode: episode)
@@ -597,13 +645,39 @@ final class FrostPlayStore: ObservableObject {
         let destination = directory.appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        let entry = DownloadEntry(id: "\(media.id)-\(episode.map(String.init) ?? "movie")", media: media, fileName: fileName, localURL: destination, downloadedAt: Date(), episode: episode)
+        let entry = DownloadEntry(id: id, media: media, fileName: fileName, localURL: destination, downloadedAt: Date(), episode: episode)
         downloads.removeAll { $0.id == entry.id }
         downloads.insert(entry, at: 0)
     }
 
+    /// Records a finished HLS asset, keeping a bookmark because Apple's downloader
+    /// relocates the bundle. Called from HLSDownloadManager's completion callback.
+    private func finishHLSDownload(id: String, location: URL) {
+        defer {
+            pendingHLSDownloads[id] = nil
+            downloadProgress[id] = nil
+        }
+        guard let pending = pendingHLSDownloads[id] else { return }
+        let bookmark = try? location.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+        let entry = DownloadEntry(
+            id: id,
+            media: pending.media,
+            fileName: AuthorizedDownloadManager.fileName(for: pending.media, episode: pending.episode),
+            localURL: location,
+            downloadedAt: Date(),
+            episode: pending.episode,
+            isHLS: true,
+            bookmarkData: bookmark
+        )
+        downloads.removeAll { $0.id == id }
+        downloads.insert(entry, at: 0)
+    }
+
     func removeDownload(_ entry: DownloadEntry) {
+        if entry.isHLS == true { HLSDownloadManager.shared.cancel(id: entry.id) }
         try? FileManager.default.removeItem(at: entry.localURL)
+        pendingHLSDownloads[entry.id] = nil
+        downloadProgress[entry.id] = nil
         downloads.removeAll { $0.id == entry.id }
     }
 
